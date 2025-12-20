@@ -26,6 +26,7 @@ Now you can take the WorkerWithoutPython.exe file (rename it if you'd like) and 
 For the stats dashboard, edit the API_URL to point to your manager.py server.
 
 For your media files, ensure they match this structure:
+```
 /Media_Root/
     |
     |--- source/          <-- Original videos
@@ -33,3 +34,4 @@ For your media files, ensure they match this structure:
     |      |--- Movie.mkv
     |
     |--- completed/       <-- Uploaded encoded versions get put here
+```
