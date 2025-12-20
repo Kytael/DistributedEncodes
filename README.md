@@ -1,4 +1,4 @@
-#FractumSeraphs Distributed Encodes
+# FractumSeraphs Distributed Encodes
 
 This tool is a distributed system that lets you crowd-source video transcoding. It splits the workload across multiple "Worker" computers (friends/volunteers/extra PCs), coordinates them via a central Manager, and uses a FTP server for file transfer. It's split into four main parts.
 manager.py: A Python/Flask server that tracks jobs, users, and the leaderboard.
