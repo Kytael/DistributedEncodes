@@ -1,0 +1,21 @@
+services:
+  ftp-server:
+    image: delfer/alpine-ftp-server
+    container_name: ftp_server
+    restart: always
+    environment:
+      - USERS=transcode|transcode
+      - ADDRESS=www.yourserver.com
+      - MIN_PORT=30000
+      - MAX_PORT=30100
+    ports:
+      - "21:21"
+      - "30000-30100:30000-30100"
+    volumes:
+      # SECURITY: We map the source folder as Read-Only (:ro)
+      # This ensures the worker cannot delete your files, even without complex User IDs.
+      - "C:/Path/To/source:/ftp/transcode/source:ro"
+      
+      # We map the completed folder as Read-Write
+      # This is the ONLY place the worker can write files.
+      - "C:/Path/Tp/completed:/ftp/transcode/completed"
