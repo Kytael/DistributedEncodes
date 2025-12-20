@@ -2,7 +2,7 @@ import requests, subprocess, os, sys, time, json, platform, uuid, argparse
 from ftplib import FTP
 
 # --- CONFIG ---
-MANAGER_URL = "http://transcode.fractumseraph.net:5000"
+MANAGER_URL = "http://www.yourserver.com:5000"
 API_TOKEN = "SecretTokenThisMustMatchTheTokenInManagerPy"
 FTP_HOST = "www.yourserver.com"
 FTP_USER = "transcode"
@@ -177,5 +177,6 @@ def main():
                 print(msg, end='\r')
                 time.sleep(10)
         except: time.sleep(10)
+
 
 if __name__ == "__main__": main()
