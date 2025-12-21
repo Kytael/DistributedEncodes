@@ -93,19 +93,44 @@ def complete_job():
 
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("SELECT source_duration FROM jobs WHERE id = ?", (job_id,))
+    
+    # --- SECURITY CHECK: Get current job status ---
+    c.execute("SELECT status, assigned_to, source_duration FROM jobs WHERE id = ?", (job_id,))
     row = c.fetchone()
-    expected_dur = row[0] if row else 0
+    
+    if not row:
+        conn.close()
+        return jsonify({"status": "error", "message": "Job not found"}), 404
+        
+    current_status, assigned_user, expected_dur = row
 
+    # CHECK 1: Is it already done? (Prevents double points)
+    if current_status == 'DONE':
+        conn.close()
+        return jsonify({"status": "error", "message": "Job already completed"}), 409
+
+    # CHECK 2: Is the submitter the correct user? (Prevents mix-ups)
+    # We allow 'Anonymous' bypass just in case, but otherwise enforce match
+    if assigned_user and assigned_user != username:
+        conn.close()
+        return jsonify({"status": "error", "message": "Job assigned to someone else"}), 403
+
+    # --- VERIFICATION RULES ---
     if meta.get('codec_name', '').lower() != RULES['codec']: return jsonify({"status": "error", "message": "Wrong Codec"}), 400
     if abs(int(meta.get('height', 0)) - RULES['height']) > TOLERANCE_HEIGHT: return jsonify({"status": "error", "message": "Wrong Resolution"}), 400
     if f'"Quality": {RULES["quality_check"]}' not in log: return jsonify({"status": "error", "message": "Wrong Quality Setting"}), 400
     if expected_dur > 0 and abs(float(meta.get('duration', 0)) - expected_dur) > TOLERANCE_DURATION: return jsonify({"status": "error", "message": "Duration Mismatch"}), 400
 
+    # --- SUCCESS ---
     dur_min = float(meta.get('duration', 0)) / 60.0
+    
+    # Mark as DONE
     c.execute("UPDATE jobs SET status = 'DONE' WHERE id = ?", (job_id,))
+    
+    # Award Points
     c.execute("INSERT OR IGNORE INTO users (username) VALUES (?)", (username,))
     c.execute("UPDATE users SET total_minutes = total_minutes + ?, jobs_completed = jobs_completed + 1 WHERE username = ?", (dur_min, username))
+    
     conn.commit()
     conn.close()
     return jsonify({"status": "success"})
@@ -152,4 +177,5 @@ def stats():
 
 if __name__ == '__main__':
     init_db()
+
     app.run(host='0.0.0.0', port=5000)
