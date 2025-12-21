@@ -2,9 +2,9 @@ import requests, subprocess, os, sys, time, json, platform, uuid, argparse
 from ftplib import FTP
 
 # --- CONFIG ---
-MANAGER_URL = "http://www.yourserver.com:5000"
-API_TOKEN = "SecretTokenThisMustMatchTheTokenInManagerPy"
-FTP_HOST = "www.yourserver.com"
+MANAGER_URL = "http://transcode.fractumseraph.net:5000"
+API_TOKEN = "FractumSecret2025"
+FTP_HOST = "transcode.fractumseraph.net"
 FTP_USER = "transcode"
 FTP_PASS = "transcode"
 # The when connecting to the ftp server, the user should see the 'source' and 'completed' folder immediately.
@@ -180,3 +180,4 @@ def main():
 
 
 if __name__ == "__main__": main()
+
