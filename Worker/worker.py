@@ -3,7 +3,7 @@ from ftplib import FTP
 
 # --- CONFIG ---
 MANAGER_URL = "http://transcode.fractumseraph.net:5000"
-API_TOKEN = "FractumSecret2025"
+API_TOKEN = "FractumSecure2025"
 FTP_HOST = "transcode.fractumseraph.net"
 FTP_USER = "transcode"
 FTP_PASS = "transcode"
@@ -180,4 +180,5 @@ def main():
 
 
 if __name__ == "__main__": main()
+
 
