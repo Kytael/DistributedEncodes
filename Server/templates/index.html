@@ -3,72 +3,140 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Distributed Encodes - Status - Tool by FractumSeraph</title>
+    <title>FRACTUM :: STATUS</title>
     <style>
         :root { --bg: #050505; --panel: #0a0a0a; --primary: #00ff41; --secondary: #bd00ff; --text: #e0e0e0; --font: 'Courier New', monospace; }
         body { background: var(--bg); color: var(--text); font-family: var(--font); padding: 20px; }
         h1, h2 { color: var(--primary); text-transform: uppercase; letter-spacing: 2px; text-shadow: 0 0 5px var(--primary); }
+        
+        /* Grid Layout */
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-top: 20px; }
+        
+        /* Cards */
         .card { background: var(--panel); border: 1px solid #333; padding: 15px; box-shadow: 0 0 10px rgba(0,255,65,0.1); }
-        .card h3 { border-bottom: 1px solid #333; padding-bottom: 10px; color: var(--secondary); margin-top: 0; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 10px; margin-bottom: 10px; }
+        .card h3 { margin: 0; padding: 0; color: var(--secondary); font-size: 1.1em; }
+
+        /* KPI Boxes */
         .kpi-row { display: flex; gap: 20px; margin-bottom: 20px; flex-wrap: wrap; }
         .kpi { flex: 1; background: var(--panel); border: 1px solid var(--primary); padding: 15px; text-align: center; }
         .kpi .val { font-size: 2em; font-weight: bold; }
         .kpi .label { font-size: 0.8em; color: var(--primary); text-transform: uppercase; }
-        table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+        
+        /* Tables */
+        table { width: 100%; border-collapse: collapse; font-size: 0.9em; table-layout: fixed; }
         td, th { padding: 8px 5px; border-bottom: 1px solid #111; text-align: left; }
+        
+        /* Filter Buttons */
+        .filters button {
+            background: #111; border: 1px solid #333; color: #888; padding: 5px 10px; cursor: pointer; font-family: var(--font); transition: all 0.2s;
+        }
+        .filters button:hover { border-color: var(--primary); color: #fff; }
+        .filters button.active {
+            background: var(--primary); color: #000; border-color: var(--primary); font-weight: bold;
+        }
+
+        /* Active Job Item Styling */
+        .job-item { margin-bottom: 10px; border-bottom: 1px dashed #333; padding-bottom: 5px; }
+        .job-user { color: var(--secondary); font-size: 0.8em; font-weight: bold; }
+        .job-file { 
+            color: #aaa; 
+            font-size: 0.9em; 
+            white-space: nowrap; 
+            overflow: hidden; 
+            text-overflow: ellipsis; 
+            cursor: help; 
+        }
     </style>
 </head>
 <body>
     <div style="max-width: 1200px; margin: 0 auto;">
-        <h1>Distributed Encodes</h1>
+        <h1>// FRACTUM_NETWORK</h1>
+        
         <div class="kpi-row">
             <div class="kpi"><div class="val" id="total">--</div><div class="label">Total Jobs</div></div>
             <div class="kpi"><div class="val" id="pending" style="color:#888">--</div><div class="label">Queue Depth</div></div>
             <div class="kpi"><div class="val" id="processing" style="color:var(--secondary)">--</div><div class="label">Active Workers</div></div>
             <div class="kpi"><div class="val" id="done" style="color:var(--primary)">--</div><div class="label">Completed</div></div>
         </div>
+
         <div class="grid">
             <div class="card">
-                <h3>>> LEADERBOARD</h3>
+                <div class="card-header">
+                    <h3>>> LEADERBOARD</h3>
+                    <div class="filters">
+                        <button onclick="setFilter('24h')" id="btn-24h">24H</button>
+                        <button onclick="setFilter('30d')" id="btn-30d">30D</button>
+                        <button onclick="setFilter('all')" id="btn-all" class="active">ALL</button>
+                    </div>
+                </div>
                 <table id="lb-table"><tbody><tr><td>Loading...</td></tr></tbody></table>
             </div>
+
             <div class="card">
-                <h3>>> ACTIVE_PROCESSES</h3>
+                <div class="card-header">
+                    <h3>>> ACTIVE_PROCESSES</h3>
+                </div>
                 <div id="active-list">Scanning...</div>
             </div>
         </div>
     </div>
-    <script>
-        const API_URL = "http://www.yourserver.com:5000/stats";
 
-        function fmtTime(m) { return m < 60 ? Math.floor(m)+"m" : (m/60).toFixed(1)+"h"; }
+    <script>
+        const API_URL = "/stats";
+        let currentFilter = 'all';
+
+        function fmtTime(m) { 
+            return m < 60 ? Math.floor(m)+"m" : (m/60).toFixed(1)+"h"; 
+        }
+
+        function setFilter(val) {
+            currentFilter = val;
+            // Update button styles
+            document.querySelectorAll('.filters button').forEach(b => b.classList.remove('active'));
+            document.getElementById('btn-'+val).classList.add('active');
+            update(); // Refresh data immediately
+        }
 
         async function update() {
             try {
-                const res = await fetch(API_URL);
+                // Fetch data with the current filter applied
+                const res = await fetch(`${API_URL}?filter=${currentFilter}`);
                 const data = await res.json();
                 
+                // Update KPI Cards
                 document.getElementById('total').innerText = data.queue.total;
                 document.getElementById('pending').innerText = data.queue.pending;
                 document.getElementById('processing').innerText = data.queue.processing;
                 document.getElementById('done').innerText = data.queue.done;
 
+                // Update Leaderboard Table
                 const lb = document.getElementById('lb-table');
                 lb.innerHTML = data.users.length ? data.users.map((u,i) => 
-                    `<tr><td>#${i+1}</td><td style="font-weight:bold;color:#fff">${u.name}</td><td>${fmtTime(u.time)}</td><td>${u.count}</td></tr>`
-                ).join('') : '<tr><td>No Data</td></tr>';
+                    `<tr>
+                        <td style="width: 40px; color:#555">#${i+1}</td>
+                        <td style="font-weight:bold; color:#e0e0e0">${u.name}</td>
+                        <td style="text-align:right; color:var(--primary)">${fmtTime(u.time)}</td>
+                        <td style="text-align:right; width: 60px;">[${u.count}]</td>
+                    </tr>`
+                ).join('') : '<tr><td colspan="4" style="text-align:center; color:#555; padding:20px;">// NO DATA //</td></tr>';
 
+                // Update Active Jobs List
                 const act = document.getElementById('active-list');
-                act.innerHTML = data.active.length ? data.active.map(j => 
-                    `<div style="margin-bottom:10px;border-bottom:1px dashed #333;padding-bottom:5px">
-                        <div style="color:var(--secondary);font-size:0.8em">USER: ${j.user}</div>
-                        <div style="color:#aaa;font-size:0.9em">${j.file.split('/').pop()}</div>
-                    </div>`
-                ).join('') : '<div style="color:#555">// IDLE</div>';
+                act.innerHTML = data.active.length ? data.active.map(j => {
+                    const cleanName = j.file.split('/').pop();
+                    return `
+                    <div class="job-item">
+                        <div class="job-user">USER: ${j.user}</div>
+                        <div class="job-file" title="${cleanName}">${cleanName}</div>
+                    </div>`;
+                }).join('') : '<div style="color:#555; padding:10px;">// SYSTEM IDLE</div>';
+
             } catch (e) { console.error(e); }
         }
-        setInterval(update, 5000);
+
+        // Start loop
+        setInterval(update, 5000); 
         update();
     </script>
 </body>
