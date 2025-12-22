@@ -3,7 +3,7 @@ from ftplib import FTP
 
 # --- VERSION CONTROL ---
 VERSION = "1.4.1" 
-REPO_URL = "https://raw.githubusercontent.com/FractumSeraph/DistributedEncodes/main/worker.py"
+REPO_URL = "https://raw.githubusercontent.com/FractumSeraph/DistributedEncodes/refs/heads/main/Worker/worker.py"
 
 # [CHANGE ME] Connection Config
 MANAGER_URL = "http://transcode.fractumseraph.net:5000"
@@ -486,4 +486,5 @@ def main():
         graceful_exit(None, None)
 
 if __name__ == "__main__": main()
+
 
