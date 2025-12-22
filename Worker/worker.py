@@ -1,9 +1,12 @@
-import requests, subprocess, os, sys, time, json, platform, uuid, signal, threading, shutil, argparse, re
+import requests, subprocess, os, sys, time, json, platform, signal, threading, shutil, argparse, re
+import urllib.request
+import zipfile
 from ftplib import FTP
 
 # --- VERSION CONTROL ---
-VERSION = "1.5.0" 
+VERSION = "2.1.0" 
 REPO_URL = "https://raw.githubusercontent.com/FractumSeraph/DistributedEncodes/main/worker.py"
+PRESET_URL = "https://raw.githubusercontent.com/FractumSeraph/DistributedEncodes/main/FractumAV1.json"
 
 # [CHANGE ME] Connection Config
 MANAGER_URL = "http://transcode.fractumseraph.net:5000"
@@ -11,6 +14,10 @@ API_TOKEN = "FractumSecure2025"
 FTP_HOST = "transcode.fractumseraph.net"
 FTP_USER = "transcode"
 FTP_PASS = "transcode"
+
+# --- DEPENDENCY CONFIG ---
+WIN_HB_URL = "https://github.com/HandBrake/HandBrake/releases/download/1.10.2/HandBrakeCLI-1.10.2-win-x86_64.zip"
+WIN_FF_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
 # --- ARGUMENT PARSING ---
 parser = argparse.ArgumentParser()
@@ -32,7 +39,7 @@ else: APP_DIR = os.path.dirname(os.path.abspath(__file__))
 RECOVERY_DIR = os.path.join(APP_DIR, "recovery")
 if not os.path.exists(RECOVERY_DIR): os.makedirs(RECOVERY_DIR)
 
-# --- PLATFORM & BACKEND SETUP ---
+# --- PLATFORM SETUP ---
 HANDBRAKE_EXE = "HandBrakeCLI"
 FFMPEG_EXE = "ffmpeg"
 FFPROBE_EXE = "ffprobe"
@@ -42,9 +49,7 @@ if platform.system() == "Windows":
     FFMPEG_EXE = os.path.join(APP_DIR, "ffmpeg.exe") 
     FFPROBE_EXE = os.path.join(APP_DIR, "ffprobe.exe")
 
-# Backend Detection (Will be set in main)
 ENCODER_BACKEND = None
-
 PRESET_FILE = os.path.join(APP_DIR, "FractumAV1.json")
 CONFIG_FILE = os.path.join(APP_DIR, "user_config.json")
 HEADERS = {"X-Auth-Token": API_TOKEN}
@@ -53,8 +58,105 @@ HEADERS = {"X-Auth-Token": API_TOKEN}
 ACTIVE_WORKERS = {}
 WORKER_LOCK = threading.Lock()
 EXIT_FLAG = threading.Event()
-# State is now a dict: {'state': 'Idle', 'pct': 0.0, 'info': ''}
 WORKER_STATE = {f"W{i+1}": {"state": "Idle", "pct": 0.0, "info": ""} for i in range(MAX_JOBS)}
+
+# --- BOOTSTRAP / INSTALLER LOGIC ---
+def is_admin():
+    try: return os.getuid() == 0
+    except AttributeError:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+
+def bootstrap_preset():
+    if not os.path.exists(PRESET_FILE):
+        print(":: BOOTSTRAP :: Downloading Recording Preset...")
+        try:
+            with urllib.request.urlopen(PRESET_URL) as r, open(PRESET_FILE, 'wb') as f:
+                f.write(r.read())
+            print("   [+] Preset downloaded.")
+        except Exception as e:
+            print(f"   [!] Failed to download preset: {e}")
+
+def bootstrap_linux():
+    print(":: BOOTSTRAP :: Checking Linux Dependencies...")
+    missing = []
+    if not (shutil.which("HandBrakeCLI") or shutil.which("ffmpeg")):
+        missing.append("encoders")
+    
+    if not missing: return
+
+    print("   [!] Missing dependencies detected. Attempting install...")
+    
+    if shutil.which("apt-get"):
+        pkg_mgr, pkgs = "apt-get", ["handbrake-cli", "ffmpeg"]
+    elif shutil.which("dnf"):
+        pkg_mgr, pkgs = "dnf", ["HandBrake-cli", "ffmpeg"]
+    elif shutil.which("pacman"):
+        pkg_mgr, pkgs = "pacman", ["handbrake-cli", "ffmpeg"]
+    else:
+        print("   [!] Error: Could not find package manager. Please install HandBrakeCLI or FFmpeg manually.")
+        sys.exit(1)
+
+    if not is_admin():
+        print(f"   [!] Root required to install packages. Rerunning with sudo...")
+        try: os.execvp("sudo", ["sudo", sys.executable] + sys.argv)
+        except Exception as e:
+            print(f"   [!] Failed to elevate: {e}"); sys.exit(1)
+
+    print(f"   [+] Installing via {pkg_mgr}...")
+    subprocess.call([pkg_mgr, "update" if pkg_mgr != "pacman" else "-Sy"])
+    install_cmd = [pkg_mgr, "install", "-y" if pkg_mgr != "pacman" else "-S"]
+    if pkg_mgr == "pacman": install_cmd.append("--noconfirm")
+    install_cmd.extend(pkgs)
+    subprocess.call(install_cmd)
+    print("   [+] Linux dependencies installed.")
+
+def bootstrap_windows():
+    print(":: BOOTSTRAP :: Checking Windows Dependencies...")
+    
+    # Check HandBrake
+    if not os.path.exists(HANDBRAKE_EXE):
+        print("   [+] Downloading HandBrakeCLI...")
+        try:
+            with urllib.request.urlopen(WIN_HB_URL) as r, open("hb.zip", 'wb') as f: shutil.copyfileobj(r, f)
+            with zipfile.ZipFile("hb.zip", 'r') as z:
+                if "HandBrakeCLI.exe" in z.namelist():
+                    with open(HANDBRAKE_EXE, "wb") as f: f.write(z.read("HandBrakeCLI.exe"))
+            os.remove("hb.zip")
+        except Exception as e: print(f"   [!] HandBrake download failed: {e}")
+
+    # Check FFmpeg/FFprobe
+    if not os.path.exists(FFMPEG_EXE) or not os.path.exists(FFPROBE_EXE):
+        print("   [+] Downloading FFmpeg tools (This may take a minute)...")
+        try:
+            with urllib.request.urlopen(WIN_FF_URL) as r, open("ff.zip", 'wb') as f: shutil.copyfileobj(r, f)
+            with zipfile.ZipFile("ff.zip", 'r') as z:
+                for name in z.namelist():
+                    if name.endswith("bin/ffmpeg.exe"):
+                        with open(FFMPEG_EXE, "wb") as f: f.write(z.read(name))
+                    elif name.endswith("bin/ffprobe.exe"):
+                        with open(FFPROBE_EXE, "wb") as f: f.write(z.read(name))
+            os.remove("ff.zip")
+        except Exception as e: print(f"   [!] FFmpeg download failed: {e}")
+
+def bootstrap_mac():
+    print(":: BOOTSTRAP :: Checking macOS Dependencies...")
+    if not (shutil.which("HandBrakeCLI") and shutil.which("ffmpeg")):
+        if not shutil.which("brew"):
+            print("   [!] Homebrew not found. Please install it: https://brew.sh/")
+            sys.exit(1)
+        print("   [+] Installing via Homebrew...")
+        subprocess.call(["brew", "install", "handbrake", "ffmpeg"])
+
+def run_bootstrap():
+    # 1. Download Preset First (Platform Independent)
+    bootstrap_preset()
+
+    # 2. Platform Specific Tools
+    sys_os = platform.system()
+    if sys_os == "Linux": bootstrap_linux()
+    elif sys_os == "Windows": bootstrap_windows()
+    elif sys_os == "Darwin": bootstrap_mac()
 
 # --- AUTO-UPDATE FUNCTION ---
 def check_for_updates():
@@ -63,7 +165,7 @@ def check_for_updates():
     try:
         r = requests.get(REPO_URL, timeout=5)
         if r.status_code != 200: 
-            print("   [!] Could not reach GitHub. Skipping update.")
+            print(f"   [!] GitHub Error {r.status_code}. Skipping update.")
             return
         remote_code = r.text
         match = re.search(r'VERSION\s*=\s*"([^"]+)"', remote_code)
@@ -88,8 +190,10 @@ def check_for_updates():
                 os.execv(sys.executable, [sys.executable] + sys.argv)
         else:
             print("   [OK] System is up to date.")
-    except: pass
+    except Exception as e:
+        print(f"   [!] Update check failed: {e}")
 
+# --- DASHBOARD & UTILS ---
 def update_status(tid, state, pct=0.0, info=""):
     WORKER_STATE[tid] = {"state": state, "pct": pct, "info": info}
 
@@ -97,12 +201,10 @@ def dashboard_loop():
     BAR_WIDTH = 30
     BLOCK = "█"
     EMPTY = "-"
-
     while not EXIT_FLAG.is_set():
         if STEALTH_MODE:
             active_count = sum(1 for v in WORKER_STATE.values() if v['state'] != "Idle")
             sys.stdout.write(f"\r:: FRACTUM SECURITY :: SYSTEM LOAD: {active_count} ACTIVE PROCESSES" + " "*20)
-        
         elif MAX_JOBS == 1:
             data = WORKER_STATE["W1"]
             state = data['state']
@@ -117,13 +219,9 @@ def dashboard_loop():
             status_line = ""
             for tid in sorted(WORKER_STATE.keys()):
                 d = WORKER_STATE[tid]
-                if d['state'] in ["Encoding", "Downloading", "Uploading"]:
-                    val = f"{d['state'][:1]}:{d['pct']:.0f}%" 
-                else:
-                    val = d['state']
+                val = f"{d['state'][:1]}:{d['pct']:.0f}%" if d['state'] in ["Encoding", "Downloading", "Uploading"] else d['state']
                 status_line += f"[{tid}: {val}] "
             sys.stdout.write(f"\r{status_line}" + " "*10)
-        
         sys.stdout.flush()
         time.sleep(0.5)
 
@@ -259,7 +357,6 @@ class ProgressReader:
     def close(self):
         self.f.close()
 
-# --- PRESET TRANSLATOR ---
 def build_encode_cmd(input_file, output_file):
     try:
         with open(PRESET_FILE, 'r') as f: 
@@ -271,13 +368,11 @@ def build_encode_cmd(input_file, output_file):
 
     height = int(preset.get('PictureHeight', 480))
     rf = int(preset.get('VideoQualitySlider', 28))
-    speed = preset.get('VideoPreset', '2') # Default to high quality
+    speed = preset.get('VideoPreset', '2') 
     
     if ENCODER_BACKEND == "handbrake":
         return [HANDBRAKE_EXE, "--preset-import-file", PRESET_FILE, "-Z", preset.get('PresetName', 'FractumAV1'), "-i", input_file, "-o", output_file]
-    
     else:
-        # FFmpeg Map
         cmd = [FFMPEG_EXE, "-y", "-v", "error", "-stats", "-i", input_file]
         cmd += ["-c:v", "libsvtav1", "-preset", str(speed), "-crf", str(rf)]
         cmd += ["-vf", f"scale=-2:{height}"] 
@@ -298,15 +393,12 @@ def process(job, username):
 
     register_worker_activity(tid, job_id=job['id'], files=[local_input, local_output])
 
-    # SAFETY CHECK: Disk Space
     try:
         total, used, free = shutil.disk_usage(APP_DIR)
         if free < (10 * 1024 * 1024 * 1024): 
             log(f"[!] Low Disk Space. Pausing...")
             requests.post(f"{MANAGER_URL}/fail_job", json={"id": job['id']}, headers=HEADERS)
-            clear_worker_activity(tid)
-            update_status(tid, "NoDisk")
-            time.sleep(300); return 
+            clear_worker_activity(tid); update_status(tid, "NoDisk"); time.sleep(300); return 
     except: pass
 
     update_status(tid, "Downloading")
@@ -342,13 +434,11 @@ def process(job, username):
 
     if EXIT_FLAG.is_set(): return
 
-    # -- GET DURATION --
     total_duration_sec = 0
     if ENCODER_BACKEND == "ffmpeg":
         meta_in = get_metadata(local_input)
         if meta_in: total_duration_sec = meta_in.get('duration', 0)
 
-    # -- ENCODE --
     hb_stop = threading.Event()
     hb_thread = threading.Thread(target=heartbeat_loop, args=(job['id'], hb_stop, tid), daemon=True)
     hb_thread.start()
@@ -361,10 +451,8 @@ def process(job, username):
         
         for line in proc.stdout:
             if EXIT_FLAG.is_set(): proc.kill(); break
-
             pct = 0.0
             info_str = "..."
-
             if ENCODER_BACKEND == "handbrake" and "Encoding" in line:
                 try:
                     pct_m = re.search(r"(\d+\.\d+) %", line)
@@ -374,7 +462,6 @@ def process(job, username):
                     if fps_m: info_str = f"{fps_m.group(1)} fps"
                     if eta_m: info_str += f" | ETA: {eta_m.group(1)}"
                 except: pass
-
             elif ENCODER_BACKEND == "ffmpeg":
                 try:
                     time_m = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
@@ -385,9 +472,7 @@ def process(job, username):
                     fps_m = re.search(r"fps=\s*(\d+\.?\d*)", line)
                     if fps_m: info_str = f"{fps_m.group(1)} fps"
                 except: pass
-            
             if pct > 0: update_status(tid, "Encoding", pct=pct, info=info_str)
-        
         proc.wait()
     finally:
         hb_stop.set(); hb_thread.join()
@@ -447,8 +532,12 @@ def worker_loop(config):
         except: update_status(tid, "Error"); time.sleep(10)
 
 def main():
-    global ENCODER_BACKEND, HANDBRAKE_EXE, FFMPEG_EXE
-
+    global ENCODER_BACKEND
+    
+    # 1. RUN BOOTSTRAP (INSTALLER)
+    run_bootstrap()
+    
+    # 2. DETECT BACKEND (After bootstrap, tools should be present)
     has_hb = shutil.which(HANDBRAKE_EXE) or os.path.exists(HANDBRAKE_EXE)
     has_ff = shutil.which(FFMPEG_EXE) or os.path.exists(FFMPEG_EXE)
 
@@ -460,12 +549,12 @@ def main():
     elif has_ff:
         ENCODER_BACKEND = "ffmpeg"
     else:
-        print("CRITICAL: Neither HandBrakeCLI nor FFmpeg was found. Please install one."); return
+        print("CRITICAL: Neither HandBrakeCLI nor FFmpeg was found. Bootstrap failed."); return
 
-    if ENCODER_BACKEND == "ffmpeg":
-        if not (shutil.which(FFPROBE_EXE) or os.path.exists(FFPROBE_EXE)):
-             print("CRITICAL: FFmpeg backend requires 'ffprobe'. Not found."); return
+    if not (shutil.which(FFPROBE_EXE) or os.path.exists(FFPROBE_EXE)):
+         print("CRITICAL: 'ffprobe' is missing. Bootstrap failed."); return
 
+    # 3. NORMAL STARTUP
     check_for_updates()
     retry_stashed()
     config = get_config()
