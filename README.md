@@ -35,4 +35,7 @@ For your media files, ensure they match this structure:
     |
     |--- completed/       <-- Uploaded encoded versions get put here
 ```
+I have an active instance running at https://vsv.fractumseraph.net/stats.html
+Feel free to help out with my encodes if you have any spare processing power! I post all of the results on the main site.
+
 <img width="1610" height="887" alt="FractumDistributedEncodes" src="https://github.com/user-attachments/assets/b256af88-1009-49a4-9a57-a739adb50270" />
