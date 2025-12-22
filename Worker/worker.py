@@ -9,7 +9,7 @@ FTP_USER = "transcode"
 FTP_PASS = "transcode"
 
 # --- STEALTH CONFIG ---
-STEALTH_MODE = True 
+STEALTH_MODE = False 
 
 if getattr(sys, 'frozen', False): APP_DIR = os.path.dirname(sys.executable)
 else: APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -153,3 +153,4 @@ def main():
         except: time.sleep(10)
 
 if __name__ == "__main__": main()
+
