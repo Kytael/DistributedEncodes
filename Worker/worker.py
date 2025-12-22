@@ -2,7 +2,7 @@ import requests, subprocess, os, sys, time, json, platform, uuid, signal, thread
 from ftplib import FTP
 
 # --- VERSION CONTROL ---
-VERSION = "1.4.0" 
+VERSION = "1.4.1" 
 REPO_URL = "https://raw.githubusercontent.com/FractumSeraph/DistributedEncodes/main/worker.py"
 
 # [CHANGE ME] Connection Config
@@ -486,3 +486,4 @@ def main():
         graceful_exit(None, None)
 
 if __name__ == "__main__": main()
+
