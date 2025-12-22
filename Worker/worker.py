@@ -216,11 +216,18 @@ def retry_stashed():
 def heartbeat_loop(job_id, stop_event, tid):
     while not stop_event.is_set():
         try: 
+            # Get status, e.g., "45.25%"
             raw_status = WORKER_STATE.get(tid, "0")
             progress = 0
+            
             if "%" in raw_status:
-                try: progress = int(raw_status.replace("%", "").strip())
-                except: pass
+                try:
+                    # 1. Remove the % sign
+                    clean_str = raw_status.replace("%", "").strip()
+                    # 2. Convert to Float (45.25), Round it (45), then make it Int (45)
+                    progress = int(float(clean_str))
+                except: 
+                    pass
             
             requests.post(f"{MANAGER_URL}/heartbeat", json={"id": job_id, "progress": progress}, headers=HEADERS, timeout=5)
         except: pass
