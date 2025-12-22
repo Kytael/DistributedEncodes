@@ -2,7 +2,7 @@ import requests, subprocess, os, sys, time, json, platform, uuid, signal, thread
 from ftplib import FTP
 
 # --- VERSION CONTROL ---
-VERSION = "1.3.0" 
+VERSION = "1.3.2" 
 REPO_URL = "https://raw.githubusercontent.com/FractumSeraph/DistributedEncodes/main/worker.py"
 
 # [CHANGE ME] Connection Config
@@ -31,6 +31,7 @@ else: APP_DIR = os.path.dirname(os.path.abspath(__file__))
 RECOVERY_DIR = os.path.join(APP_DIR, "recovery")
 if not os.path.exists(RECOVERY_DIR): os.makedirs(RECOVERY_DIR)
 
+# --- PLATFORM SETUP ---
 if platform.system() == "Windows":
     HANDBRAKE_EXE = os.path.join(APP_DIR, "HandBrakeCLI.exe")
     FFPROBE_EXE = os.path.join(APP_DIR, "ffprobe.exe")
@@ -50,7 +51,7 @@ EXIT_FLAG = threading.Event()
 # State is now a dict: {'state': 'Idle', 'pct': 0.0, 'info': ''}
 WORKER_STATE = {f"W{i+1}": {"state": "Idle", "pct": 0.0, "info": ""} for i in range(MAX_JOBS)}
 
-# --- AUTO-UPDATE FUNCTION ---
+# --- AUTO-UPDATE FUNCTION --- (Work in progrss)
 def check_for_updates():
     if SKIP_UPDATE: return
     print(f":: SYSTEM :: Checking for updates (Current: {VERSION})...")
@@ -88,7 +89,6 @@ def update_status(tid, state, pct=0.0, info=""):
     WORKER_STATE[tid] = {"state": state, "pct": pct, "info": info}
 
 def dashboard_loop():
-    # Progress Bar Characters
     BAR_WIDTH = 30
     BLOCK = "█"
     EMPTY = "-"
@@ -99,7 +99,6 @@ def dashboard_loop():
             sys.stdout.write(f"\r:: FRACTUM SECURITY :: SYSTEM LOAD: {active_count} ACTIVE PROCESSES" + " "*20)
         
         elif MAX_JOBS == 1:
-            # --- SINGLE JOB MODE (FANCY BAR) ---
             data = WORKER_STATE["W1"]
             state = data['state']
             
@@ -107,14 +106,11 @@ def dashboard_loop():
                 pct = data['pct']
                 filled = int(BAR_WIDTH * pct / 100)
                 bar = BLOCK * filled + EMPTY * (BAR_WIDTH - filled)
-                # Output: [██████----] 60.5% | 24fps | ETA: 00h10m
                 sys.stdout.write(f"\r[{bar}] {pct:.2f}% | {data['info']}   ")
             else:
-                # Idle / Downloading / Uploading
                 sys.stdout.write(f"\r>> STATUS: {state} {data['info']}" + " "*20)
 
         else:
-            # --- MULTI JOB MODE (COMPACT) ---
             status_line = ""
             for tid in sorted(WORKER_STATE.keys()):
                 d = WORKER_STATE[tid]
@@ -143,21 +139,28 @@ def clear_worker_activity(thread_id):
 
 def graceful_exit(signum, frame):
     EXIT_FLAG.set() 
+    sys.stdout.write("\n\n[!] INTERRUPT DETECTED. STOPPING...\n")
+    
     with WORKER_LOCK:
         for tid, data in ACTIVE_WORKERS.items():
             if data.get("proc"):
-                try: data["proc"].kill()
+                try: 
+                    data["proc"].kill()
                 except: pass
+            
             if data.get("job_id"):
-                try: requests.post(f"{MANAGER_URL}/fail_job", json={"id": data["job_id"]}, headers=HEADERS, timeout=2)
+                try: requests.post(f"{MANAGER_URL}/fail_job", json={"id": data["job_id"]}, headers=HEADERS, timeout=1)
                 except: pass
+                
             if data.get("files"):
                 for f in data["files"]:
                     if os.path.exists(f):
                         try: os.remove(f)
                         except: pass
-    print("\n:: SYSTEM HALTED ::")
-    sys.exit(0)
+    
+    print(":: SYSTEM HALTED ::")
+    # Nuclear Option: Force kill process immediately.
+    os._exit(0)
 
 signal.signal(signal.SIGINT, graceful_exit)
 signal.signal(signal.SIGTERM, graceful_exit)
@@ -231,6 +234,7 @@ def retry_stashed():
 
 def heartbeat_loop(job_id, stop_event, tid):
     while not stop_event.is_set():
+        if EXIT_FLAG.is_set(): break
         try: 
             # Safely grab float percent from state dict
             pct = int(WORKER_STATE[tid]['pct'])
@@ -246,6 +250,9 @@ def safe_ftp_cwd(ftp, path):
             except: pass
 
 def process(job, username):
+    # [CHECK 1]
+    if EXIT_FLAG.is_set(): return
+
     tid = threading.current_thread().name
     job_path = job['filename'].replace("\\", "/")
     real_output_name = "av1_" + job_path.replace("/", "_")
@@ -273,6 +280,7 @@ def process(job, username):
     update_status(tid, "Downloading")
     download_success = False
     for attempt in range(3):
+        if EXIT_FLAG.is_set(): return # [CHECK 2]
         try:
             ftp = FTP(FTP_HOST); ftp.login(FTP_USER, FTP_PASS)
             try: ftp.cwd("source") 
@@ -284,10 +292,14 @@ def process(job, username):
             
     if not download_success:
         if os.path.exists(local_input): os.remove(local_input)
-        requests.post(f"{MANAGER_URL}/fail_job", json={"id": job['id']}, headers=HEADERS)
+        if not EXIT_FLAG.is_set(): 
+            requests.post(f"{MANAGER_URL}/fail_job", json={"id": job['id']}, headers=HEADERS)
         clear_worker_activity(tid)
         update_status(tid, "Idle")
         return
+
+    # [CHECK 3]
+    if EXIT_FLAG.is_set(): return
 
     # ENCODE
     hb_stop = threading.Event()
@@ -303,11 +315,13 @@ def process(job, username):
         register_worker_activity(tid, proc=proc)
         
         for line in proc.stdout:
-            # Parse HandBrake Output for Rich Progress
+            # Check exit flag constantly during encoding loop
+            if EXIT_FLAG.is_set(): 
+                proc.kill()
+                break
+
             if "Encoding" in line:
                 try:
-                    # Regex to find Percentage, FPS, and ETA
-                    # Sample: "Encoding: task 1 of 1, 45.50 % (24.12 fps, avg 24.00 fps, eta 00h05m00s)"
                     pct_m = re.search(r"(\d+\.\d+) %", line)
                     fps_m = re.search(r"(\d+\.\d+) fps", line)
                     eta_m = re.search(r"eta (\w+)", line)
@@ -325,6 +339,9 @@ def process(job, username):
     finally:
         hb_stop.set(); hb_thread.join()
 
+    # [CHECK 4]
+    if EXIT_FLAG.is_set(): return
+
     # UPLOAD
     update_status(tid, "Uploading")
     uploaded = False
@@ -334,6 +351,7 @@ def process(job, username):
 
     if meta:
         for attempt in range(3):
+            if EXIT_FLAG.is_set(): return # [CHECK 5]
             try:
                 ftp = FTP(FTP_HOST); ftp.login(FTP_USER, FTP_PASS)
                 try: ftp.cwd("completed")
@@ -343,6 +361,8 @@ def process(job, username):
                 requests.post(f"{MANAGER_URL}/complete_job", json=job_payload, headers=HEADERS)
                 uploaded = True; break
             except: time.sleep(10)
+    else:
+        log(f"[!] Encoding Failed. Output file invalid: {local_output}")
 
     try: os.remove(local_input)
     except: pass
@@ -350,8 +370,14 @@ def process(job, username):
     if uploaded:
         try: os.remove(local_output)
         except: pass
-    else:
+    elif meta and not EXIT_FLAG.is_set():
         stash_job(local_output, job_payload)
+    else:
+        # If encoding failed OR we are quitting, fail the job on server
+        if not EXIT_FLAG.is_set():
+            requests.post(f"{MANAGER_URL}/fail_job", json={"id": job['id']}, headers=HEADERS)
+        try: os.remove(local_output)
+        except: pass
     
     clear_worker_activity(tid)
     update_status(tid, "Idle")
@@ -365,9 +391,15 @@ def worker_loop(config):
     while not EXIT_FLAG.is_set():
         try:
             time.sleep(1) 
+            if EXIT_FLAG.is_set(): break
+
             r = requests.post(f"{MANAGER_URL}/get_job", json={"username": display_name}, headers=HEADERS, timeout=5)
             data = r.json()
-            if data['status'] == 'found': process(data, username)
+            
+            if EXIT_FLAG.is_set(): break
+            
+            if data['status'] == 'found': 
+                process(data, username)
             else: 
                 update_status(tid, "Waiting")
                 time.sleep(10)
@@ -399,7 +431,10 @@ def main():
         threads.append(t)
         time.sleep(0.5)
     
-    for t in threads:
-        t.join()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        graceful_exit(None, None)
 
 if __name__ == "__main__": main()
