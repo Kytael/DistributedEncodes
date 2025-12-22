@@ -2,7 +2,7 @@ import requests, subprocess, os, sys, time, json, platform, uuid, signal, thread
 from ftplib import FTP
 
 # --- VERSION CONTROL ---
-VERSION = "1.3.2" 
+VERSION = "1.4.0" 
 REPO_URL = "https://raw.githubusercontent.com/FractumSeraph/DistributedEncodes/main/worker.py"
 
 # [CHANGE ME] Connection Config
@@ -51,7 +51,7 @@ EXIT_FLAG = threading.Event()
 # State is now a dict: {'state': 'Idle', 'pct': 0.0, 'info': ''}
 WORKER_STATE = {f"W{i+1}": {"state": "Idle", "pct": 0.0, "info": ""} for i in range(MAX_JOBS)}
 
-# --- AUTO-UPDATE FUNCTION --- (Work in progrss)
+# --- AUTO-UPDATE FUNCTION ---
 def check_for_updates():
     if SKIP_UPDATE: return
     print(f":: SYSTEM :: Checking for updates (Current: {VERSION})...")
@@ -102,11 +102,13 @@ def dashboard_loop():
             data = WORKER_STATE["W1"]
             state = data['state']
             
-            if state == "Encoding":
+            # Show Bar for Encoding, Downloading, and Uploading
+            if state in ["Encoding", "Downloading", "Uploading"]:
                 pct = data['pct']
                 filled = int(BAR_WIDTH * pct / 100)
                 bar = BLOCK * filled + EMPTY * (BAR_WIDTH - filled)
-                sys.stdout.write(f"\r[{bar}] {pct:.2f}% | {data['info']}   ")
+                # Output: [██████----] 60.5% | 24fps | ETA: 00h10m
+                sys.stdout.write(f"\r[{bar}] {pct:.1f}% | {state} {data['info']}   ")
             else:
                 sys.stdout.write(f"\r>> STATUS: {state} {data['info']}" + " "*20)
 
@@ -114,7 +116,11 @@ def dashboard_loop():
             status_line = ""
             for tid in sorted(WORKER_STATE.keys()):
                 d = WORKER_STATE[tid]
-                val = f"{d['pct']:.0f}%" if d['state'] == "Encoding" else d['state']
+                # Show percentage for transfer states too
+                if d['state'] in ["Encoding", "Downloading", "Uploading"]:
+                    val = f"{d['state'][:1]}:{d['pct']:.0f}%" 
+                else:
+                    val = d['state']
                 status_line += f"[{tid}: {val}] "
             sys.stdout.write(f"\r{status_line}" + " "*10)
         
@@ -159,7 +165,6 @@ def graceful_exit(signum, frame):
                         except: pass
     
     print(":: SYSTEM HALTED ::")
-    # Nuclear Option: Force kill process immediately.
     os._exit(0)
 
 signal.signal(signal.SIGINT, graceful_exit)
@@ -236,7 +241,6 @@ def heartbeat_loop(job_id, stop_event, tid):
     while not stop_event.is_set():
         if EXIT_FLAG.is_set(): break
         try: 
-            # Safely grab float percent from state dict
             pct = int(WORKER_STATE[tid]['pct'])
             requests.post(f"{MANAGER_URL}/heartbeat", json={"id": job_id, "progress": pct}, headers=HEADERS, timeout=5)
         except: pass
@@ -249,8 +253,28 @@ def safe_ftp_cwd(ftp, path):
             try: ftp.cwd(folder)
             except: pass
 
+# --- PROGRESS HELPER FOR UPLOAD ---
+class ProgressReader:
+    def __init__(self, path, tid):
+        self.f = open(path, 'rb')
+        self.size = os.path.getsize(path)
+        self.sent = 0
+        self.tid = tid
+        
+    def read(self, block_size):
+        if EXIT_FLAG.is_set(): raise InterruptedError("Stop")
+        chunk = self.f.read(block_size)
+        self.sent += len(chunk)
+        if self.size:
+            pct = (self.sent / self.size) * 100
+            info = f"({self.sent // (1024*1024)}/{self.size // (1024*1024)} MB)"
+            update_status(self.tid, "Uploading", pct=pct, info=info)
+        return chunk
+        
+    def close(self):
+        self.f.close()
+
 def process(job, username):
-    # [CHECK 1]
     if EXIT_FLAG.is_set(): return
 
     tid = threading.current_thread().name
@@ -279,15 +303,35 @@ def process(job, username):
     # DOWNLOAD
     update_status(tid, "Downloading")
     download_success = False
+    
     for attempt in range(3):
-        if EXIT_FLAG.is_set(): return # [CHECK 2]
+        if EXIT_FLAG.is_set(): return
         try:
             ftp = FTP(FTP_HOST); ftp.login(FTP_USER, FTP_PASS)
             try: ftp.cwd("source") 
             except: pass 
             safe_ftp_cwd(ftp, os.path.dirname(job_path))
-            with open(local_input, 'wb') as f: ftp.retrbinary(f"RETR {os.path.basename(job_path)}", f.write)
+            
+            # [NEW] Get Size and use Callback for Progress
+            try: total_size = ftp.size(os.path.basename(job_path))
+            except: total_size = 0
+            
+            downloaded = 0
+            def dl_callback(data):
+                nonlocal downloaded
+                if EXIT_FLAG.is_set(): raise InterruptedError("Stop")
+                f.write(data)
+                downloaded += len(data)
+                if total_size:
+                    pct = (downloaded / total_size) * 100
+                    info = f"({downloaded // (1024*1024)}/{total_size // (1024*1024)} MB)"
+                    update_status(tid, "Downloading", pct=pct, info=info)
+            
+            with open(local_input, 'wb') as f: 
+                ftp.retrbinary(f"RETR {os.path.basename(job_path)}", dl_callback, blocksize=8192)
+            
             ftp.quit(); download_success = True; break
+        except InterruptedError: return
         except: time.sleep(5)
             
     if not download_success:
@@ -298,7 +342,6 @@ def process(job, username):
         update_status(tid, "Idle")
         return
 
-    # [CHECK 3]
     if EXIT_FLAG.is_set(): return
 
     # ENCODE
@@ -315,7 +358,6 @@ def process(job, username):
         register_worker_activity(tid, proc=proc)
         
         for line in proc.stdout:
-            # Check exit flag constantly during encoding loop
             if EXIT_FLAG.is_set(): 
                 proc.kill()
                 break
@@ -339,7 +381,6 @@ def process(job, username):
     finally:
         hb_stop.set(); hb_thread.join()
 
-    # [CHECK 4]
     if EXIT_FLAG.is_set(): return
 
     # UPLOAD
@@ -351,15 +392,23 @@ def process(job, username):
 
     if meta:
         for attempt in range(3):
-            if EXIT_FLAG.is_set(): return # [CHECK 5]
+            if EXIT_FLAG.is_set(): return
             try:
                 ftp = FTP(FTP_HOST); ftp.login(FTP_USER, FTP_PASS)
                 try: ftp.cwd("completed")
                 except: pass 
-                with open(local_output, 'rb') as f: ftp.storbinary(f"STOR {real_output_name}", f)
+                
+                # [NEW] Use ProgressReader wrapper
+                reader = ProgressReader(local_output, tid)
+                try:
+                    ftp.storbinary(f"STOR {real_output_name}", reader, blocksize=8192)
+                finally:
+                    reader.close()
+                
                 ftp.quit()
                 requests.post(f"{MANAGER_URL}/complete_job", json=job_payload, headers=HEADERS)
                 uploaded = True; break
+            except InterruptedError: return
             except: time.sleep(10)
     else:
         log(f"[!] Encoding Failed. Output file invalid: {local_output}")
@@ -373,7 +422,6 @@ def process(job, username):
     elif meta and not EXIT_FLAG.is_set():
         stash_job(local_output, job_payload)
     else:
-        # If encoding failed OR we are quitting, fail the job on server
         if not EXIT_FLAG.is_set():
             requests.post(f"{MANAGER_URL}/fail_job", json={"id": job['id']}, headers=HEADERS)
         try: os.remove(local_output)
