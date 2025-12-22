@@ -4,9 +4,14 @@ import zipfile
 from ftplib import FTP
 
 # --- VERSION CONTROL ---
-VERSION = "2.1.0" 
-REPO_URL = "https://raw.githubusercontent.com/FractumSeraph/DistributedEncodes/refs/heads/main/Worker/worker.py"
-PRESET_URL = "https://raw.githubusercontent.com/FractumSeraph/DistributedEncodes/refs/heads/main/Worker/FractumAV1.json"
+VERSION = "2.2.0" 
+GITHUB_REPO = "FractumSeraph/DistributedEncodes"
+# For Script Users (Linux/Mac)
+RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/worker.py"
+# For EXE Users (Windows)
+RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+PRESET_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/FractumAV1.json"
 
 # [CHANGE ME] Connection Config
 MANAGER_URL = "http://transcode.fractumseraph.net:5000"
@@ -82,39 +87,26 @@ def bootstrap_linux():
     missing = []
     if not (shutil.which("HandBrakeCLI") or shutil.which("ffmpeg")):
         missing.append("encoders")
-    
     if not missing: return
-
     print("   [!] Missing dependencies detected. Attempting install...")
-    
-    if shutil.which("apt-get"):
-        pkg_mgr, pkgs = "apt-get", ["handbrake-cli", "ffmpeg"]
-    elif shutil.which("dnf"):
-        pkg_mgr, pkgs = "dnf", ["HandBrake-cli", "ffmpeg"]
-    elif shutil.which("pacman"):
-        pkg_mgr, pkgs = "pacman", ["handbrake-cli", "ffmpeg"]
-    else:
-        print("   [!] Error: Could not find package manager. Please install HandBrakeCLI or FFmpeg manually.")
-        sys.exit(1)
+    if shutil.which("apt-get"): pkg_mgr, pkgs = "apt-get", ["handbrake-cli", "ffmpeg"]
+    elif shutil.which("dnf"): pkg_mgr, pkgs = "dnf", ["HandBrake-cli", "ffmpeg"]
+    elif shutil.which("pacman"): pkg_mgr, pkgs = "pacman", ["handbrake-cli", "ffmpeg"]
+    else: print("   [!] Error: Package manager not found."); sys.exit(1)
 
     if not is_admin():
-        print(f"   [!] Root required to install packages. Rerunning with sudo...")
+        print(f"   [!] Root required. Rerunning with sudo..."); 
         try: os.execvp("sudo", ["sudo", sys.executable] + sys.argv)
-        except Exception as e:
-            print(f"   [!] Failed to elevate: {e}"); sys.exit(1)
+        except: sys.exit(1)
 
-    print(f"   [+] Installing via {pkg_mgr}...")
     subprocess.call([pkg_mgr, "update" if pkg_mgr != "pacman" else "-Sy"])
     install_cmd = [pkg_mgr, "install", "-y" if pkg_mgr != "pacman" else "-S"]
     if pkg_mgr == "pacman": install_cmd.append("--noconfirm")
     install_cmd.extend(pkgs)
     subprocess.call(install_cmd)
-    print("   [+] Linux dependencies installed.")
 
 def bootstrap_windows():
     print(":: BOOTSTRAP :: Checking Windows Dependencies...")
-    
-    # Check HandBrake
     if not os.path.exists(HANDBRAKE_EXE):
         print("   [+] Downloading HandBrakeCLI...")
         try:
@@ -123,11 +115,10 @@ def bootstrap_windows():
                 if "HandBrakeCLI.exe" in z.namelist():
                     with open(HANDBRAKE_EXE, "wb") as f: f.write(z.read("HandBrakeCLI.exe"))
             os.remove("hb.zip")
-        except Exception as e: print(f"   [!] HandBrake download failed: {e}")
+        except: pass
 
-    # Check FFmpeg/FFprobe
     if not os.path.exists(FFMPEG_EXE) or not os.path.exists(FFPROBE_EXE):
-        print("   [+] Downloading FFmpeg tools (This may take a minute)...")
+        print("   [+] Downloading FFmpeg tools...")
         try:
             with urllib.request.urlopen(WIN_FF_URL) as r, open("ff.zip", 'wb') as f: shutil.copyfileobj(r, f)
             with zipfile.ZipFile("ff.zip", 'r') as z:
@@ -137,22 +128,16 @@ def bootstrap_windows():
                     elif name.endswith("bin/ffprobe.exe"):
                         with open(FFPROBE_EXE, "wb") as f: f.write(z.read(name))
             os.remove("ff.zip")
-        except Exception as e: print(f"   [!] FFmpeg download failed: {e}")
+        except: pass
 
 def bootstrap_mac():
     print(":: BOOTSTRAP :: Checking macOS Dependencies...")
     if not (shutil.which("HandBrakeCLI") and shutil.which("ffmpeg")):
-        if not shutil.which("brew"):
-            print("   [!] Homebrew not found. Please install it: https://brew.sh/")
-            sys.exit(1)
-        print("   [+] Installing via Homebrew...")
+        if not shutil.which("brew"): print("   [!] Homebrew not found."); sys.exit(1)
         subprocess.call(["brew", "install", "handbrake", "ffmpeg"])
 
 def run_bootstrap():
-    # 1. Download Preset First (Platform Independent)
     bootstrap_preset()
-
-    # 2. Platform Specific Tools
     sys_os = platform.system()
     if sys_os == "Linux": bootstrap_linux()
     elif sys_os == "Windows": bootstrap_windows()
@@ -161,37 +146,76 @@ def run_bootstrap():
 # --- AUTO-UPDATE FUNCTION ---
 def check_for_updates():
     if SKIP_UPDATE: return
+    
+    # Clean up old executable artifacts (Windows)
+    if getattr(sys, 'frozen', False):
+        try:
+            old_exe = sys.executable + ".old"
+            if os.path.exists(old_exe): os.remove(old_exe)
+        except: pass
+
     print(f":: SYSTEM :: Checking for updates (Current: {VERSION})...")
-    try:
-        r = requests.get(REPO_URL, timeout=5)
-        if r.status_code != 200: 
-            print(f"   [!] GitHub Error {r.status_code}. Skipping update.")
-            return
-        remote_code = r.text
-        match = re.search(r'VERSION\s*=\s*"([^"]+)"', remote_code)
-        if not match: return
-        remote_version = match.group(1)
-        
-        if remote_version != VERSION:
-            print(f"   [!] New version found: {remote_version}")
-            if getattr(sys, 'frozen', False):
-                print("   " + "="*50)
-                print("   [!] CRITICAL: CLIENT OUT OF DATE")
-                print("   " + "="*50)
-                input("   Press Enter to continue...")
+    
+    # -- PATH 1: COMPILED EXE UPDATE --
+    if getattr(sys, 'frozen', False):
+        try:
+            r = requests.get(RELEASE_API, timeout=5)
+            if r.status_code != 200: return
+            data = r.json()
+            remote_tag = data['tag_name'].lstrip('v')
+            
+            if remote_tag != VERSION:
+                print(f"   [!] New version found: {remote_tag}")
+                exe_url = None
+                for asset in data['assets']:
+                    if asset['name'].endswith(".exe"):
+                        exe_url = asset['browser_download_url']
+                        break
+                
+                if not exe_url: print("   [!] No exe asset found."); return
+
+                print("   [+] Downloading update...")
+                new_exe = sys.executable + ".new"
+                with requests.get(exe_url, stream=True) as r:
+                    with open(new_exe, 'wb') as f: shutil.copyfileobj(r.raw, f)
+                
+                print("   [+] Installing...")
+                old_exe = sys.executable + ".old"
+                if os.path.exists(old_exe): os.remove(old_exe)
+                os.rename(sys.executable, old_exe)
+                os.rename(new_exe, sys.executable)
+                
+                print("   [+] Restarting...")
+                subprocess.Popen([sys.executable] + sys.argv[1:])
+                sys.exit(0)
             else:
+                print("   [OK] System is up to date.")
+        except Exception as e:
+            print(f"   [!] Update check failed: {e}")
+
+    # -- PATH 2: PYTHON SCRIPT UPDATE --
+    else:
+        try:
+            r = requests.get(RAW_URL, timeout=5)
+            if r.status_code != 200: return
+            remote_code = r.text
+            match = re.search(r'VERSION\s*=\s*"([^"]+)"', remote_code)
+            if not match: return
+            remote_version = match.group(1)
+            
+            if remote_version != VERSION:
+                print(f"   [!] New version found: {remote_version}")
                 print(f"   [+] Installing update...")
                 script_path = os.path.abspath(__file__)
                 shutil.copy2(script_path, script_path + ".bak")
                 with open(script_path, 'w', encoding='utf-8') as f:
                     f.write(remote_code)
-                print("   [+] Update installed. Restarting...")
+                print("   [+] Restarting...")
                 time.sleep(1)
                 os.execv(sys.executable, [sys.executable] + sys.argv)
-        else:
-            print("   [OK] System is up to date.")
-    except Exception as e:
-        print(f"   [!] Update check failed: {e}")
+            else:
+                print("   [OK] System is up to date.")
+        except: pass
 
 # --- DASHBOARD & UTILS ---
 def update_status(tid, state, pct=0.0, info=""):
@@ -533,28 +557,19 @@ def worker_loop(config):
 
 def main():
     global ENCODER_BACKEND
-    
-    # 1. RUN BOOTSTRAP (INSTALLER)
     run_bootstrap()
-    
-    # 2. DETECT BACKEND (After bootstrap, tools should be present)
     has_hb = shutil.which(HANDBRAKE_EXE) or os.path.exists(HANDBRAKE_EXE)
     has_ff = shutil.which(FFMPEG_EXE) or os.path.exists(FFMPEG_EXE)
-
     if args.force_ffmpeg:
         if has_ff: ENCODER_BACKEND = "ffmpeg"
         else: print("CRITICAL: Force FFmpeg requested, but ffmpeg not found."); return
-    elif has_hb:
-        ENCODER_BACKEND = "handbrake"
-    elif has_ff:
-        ENCODER_BACKEND = "ffmpeg"
-    else:
-        print("CRITICAL: Neither HandBrakeCLI nor FFmpeg was found. Bootstrap failed."); return
+    elif has_hb: ENCODER_BACKEND = "handbrake"
+    elif has_ff: ENCODER_BACKEND = "ffmpeg"
+    else: print("CRITICAL: No backend found."); return
 
     if not (shutil.which(FFPROBE_EXE) or os.path.exists(FFPROBE_EXE)):
-         print("CRITICAL: 'ffprobe' is missing. Bootstrap failed."); return
+         print("CRITICAL: 'ffprobe' is missing."); return
 
-    # 3. NORMAL STARTUP
     check_for_updates()
     retry_stashed()
     config = get_config()
@@ -562,10 +577,8 @@ def main():
     worker = config['worker_name']
     
     print(f"\n:: FRACTUM NODE :: BACKEND: {ENCODER_BACKEND.upper()} :: USER: {username} :: WORKER: {worker}")
-    
     dash_t = threading.Thread(target=dashboard_loop, daemon=True)
     dash_t.start()
-    
     threads = []
     for i in range(MAX_JOBS):
         t = threading.Thread(target=worker_loop, args=(config,), name=f"W{i+1}")
@@ -579,4 +592,3 @@ def main():
         graceful_exit(None, None)
 
 if __name__ == "__main__": main()
-
