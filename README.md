@@ -35,3 +35,4 @@ For your media files, ensure they match this structure:
     |
     |--- completed/       <-- Uploaded encoded versions get put here
 ```
+<img width="1610" height="887" alt="FractumDistributedEncodes" src="https://github.com/user-attachments/assets/b256af88-1009-49a4-9a57-a739adb50270" />
