@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import sqlite3, os, datetime, time, threading
 from functools import wraps
@@ -8,6 +8,8 @@ CORS(app)
 
 DB_NAME = "queue.db"
 API_TOKEN = "FractumSecure2025"
+# Optional: Add your Admin Token here if you use the reset tool
+ADMIN_TOKEN = os.environ.get("FRACTUM_ADMIN_TOKEN", "FractumAdmin2025")
 
 # --- SECURITY: RATE LIMITER ---
 REQUEST_HISTORY = {}
@@ -58,11 +60,9 @@ def init_db():
             try: c.execute(f"ALTER TABLE jobs ADD COLUMN {col} {dtype}")
             except: pass
 
-    # 3. STATUS MIGRATION (Fix Uppercase/Lowercase)
+    # 3. STATUS MIGRATION
     try:
         c.execute("UPDATE jobs SET status='pending' WHERE status='PENDING'")
-        # Note: We do NOT reset PROCESSING here anymore to avoid hiding active workers.
-        # Instead, we catch them in the heartbeat.
         c.execute("UPDATE jobs SET status='completed' WHERE status='DONE'")
         if 'assigned_to' in columns and 'worker' in columns:
             c.execute("UPDATE jobs SET worker=assigned_to WHERE worker IS NULL")
@@ -70,6 +70,14 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+# --- ROUTES ---
+
+# [RESTORED] Serve the Dashboard
+@app.route('/')
+def dashboard():
+    # Serves index.html from the current directory
+    return send_from_directory('.', 'index.html')
 
 @app.route('/get_job', methods=['POST'])
 @check_auth
@@ -107,7 +115,7 @@ def heartbeat():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # [FIX] Revive "invisible" jobs. If a worker sends a heartbeat, force status to 'processing'.
+    # Revive "invisible" jobs
     c.execute("""
         UPDATE jobs 
         SET start_time=?, progress=?, status='processing' 
@@ -130,7 +138,6 @@ def complete_job():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # Allow completion if status is processing OR if it was pending (revived)
     c.execute("SELECT worker, status FROM jobs WHERE id=?", (job_id,))
     row = c.fetchone()
     if not row or row[1] == 'completed':
@@ -160,7 +167,6 @@ def fail_job():
     conn.close()
     return jsonify({"status": "reset"})
 
-# [RESTORED] Required for adding new files
 @app.route('/populate', methods=['POST'])
 @check_auth
 def populate():
@@ -171,7 +177,6 @@ def populate():
     c = conn.cursor()
     count = 0
     for item in files:
-        # Check for duplicates
         c.execute("SELECT id FROM jobs WHERE filename = ?", (item['filename'],))
         if not c.fetchone():
             c.execute("INSERT INTO jobs (filename, status, start_time, progress) VALUES (?, 'pending', 0, 0)", 
@@ -189,7 +194,6 @@ def stats():
     
     c.execute("SELECT status, COUNT(*) FROM jobs GROUP BY status")
     counts = dict(c.fetchall())
-    # Handle both old Uppercase and new Lowercase keys just in case
     queue_stats = {
         "total": sum(counts.values()),
         "pending": counts.get('pending', 0) + counts.get('PENDING', 0),
@@ -211,7 +215,6 @@ def stats():
     users = [{"name": r[0], "time": round(r[1] or 0, 1), "count": r[2]} for r in c.fetchall()]
 
     try:
-        # Select active workers. Coalesce worker name to 'Unknown' if NULL.
         c.execute("SELECT COALESCE(worker, 'Unknown'), filename, progress FROM jobs WHERE status='processing'")
         active = [{"user": r[0], "file": r[1], "progress": r[2]} for r in c.fetchall()]
     except:
@@ -219,6 +222,22 @@ def stats():
     
     conn.close()
     return jsonify({"queue": queue_stats, "users": users, "active": active})
+
+# [RESTORED] Admin Reset Tool
+@app.route('/admin/reset', methods=['GET'])
+def admin_reset():
+    user_token = request.args.get('token')
+    if not user_token or user_token != ADMIN_TOKEN:
+        return "Unauthorized", 403
+    
+    job_id = request.args.get('id')
+    if not job_id: return "Missing ID", 400
+    
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute("UPDATE jobs SET status='pending', worker=NULL, progress=0 WHERE id=?", (job_id,))
+    conn.commit()
+    conn.close()
+    return f"Job {job_id} reset to pending."
 
 if __name__ == '__main__':
     init_db()
