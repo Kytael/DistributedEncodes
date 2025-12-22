@@ -2,7 +2,7 @@ import requests, subprocess, os, sys, time, json, platform, uuid, signal, thread
 from ftplib import FTP
 
 # --- VERSION CONTROL ---
-VERSION = "1.2.0" 
+VERSION = "1.3.0" 
 REPO_URL = "https://raw.githubusercontent.com/FractumSeraph/DistributedEncodes/main/worker.py"
 
 # [CHANGE ME] Connection Config
@@ -31,7 +31,6 @@ else: APP_DIR = os.path.dirname(os.path.abspath(__file__))
 RECOVERY_DIR = os.path.join(APP_DIR, "recovery")
 if not os.path.exists(RECOVERY_DIR): os.makedirs(RECOVERY_DIR)
 
-# --- PLATFORM SETUP ---
 if platform.system() == "Windows":
     HANDBRAKE_EXE = os.path.join(APP_DIR, "HandBrakeCLI.exe")
     FFPROBE_EXE = os.path.join(APP_DIR, "ffprobe.exe")
@@ -47,37 +46,31 @@ HEADERS = {"X-Auth-Token": API_TOKEN}
 ACTIVE_WORKERS = {}
 WORKER_LOCK = threading.Lock()
 EXIT_FLAG = threading.Event()
-WORKER_STATE = {f"W{i+1}": "Idle" for i in range(MAX_JOBS)}
+
+# State is now a dict: {'state': 'Idle', 'pct': 0.0, 'info': ''}
+WORKER_STATE = {f"W{i+1}": {"state": "Idle", "pct": 0.0, "info": ""} for i in range(MAX_JOBS)}
 
 # --- AUTO-UPDATE FUNCTION ---
 def check_for_updates():
     if SKIP_UPDATE: return
-    
     print(f":: SYSTEM :: Checking for updates (Current: {VERSION})...")
     try:
         r = requests.get(REPO_URL, timeout=5)
         if r.status_code != 200: 
             print("   [!] Could not reach GitHub. Skipping update.")
             return
-        
         remote_code = r.text
         match = re.search(r'VERSION\s*=\s*"([^"]+)"', remote_code)
-        if not match:
-            print("   [!] Could not parse remote version.")
-            return
-        
+        if not match: return
         remote_version = match.group(1)
         
         if remote_version != VERSION:
             print(f"   [!] New version found: {remote_version}")
             if getattr(sys, 'frozen', False):
                 print("   " + "="*50)
-                print("   [!] CRITICAL: YOUR CLIENT IS OUT OF DATE")
-                print("   [!] Automatic updates are not supported in the compiled version.")
-                print(f"   [!] Local: {VERSION} | Latest: {remote_version}")
-                print("   [!] Please download the new executable from GitHub.")
+                print("   [!] CRITICAL: CLIENT OUT OF DATE")
                 print("   " + "="*50)
-                input("   Press Enter to continue anyway (or Ctrl+C to exit)...")
+                input("   Press Enter to continue...")
             else:
                 print(f"   [+] Installing update...")
                 script_path = os.path.abspath(__file__)
@@ -89,22 +82,46 @@ def check_for_updates():
                 os.execv(sys.executable, [sys.executable] + sys.argv)
         else:
             print("   [OK] System is up to date.")
-    except Exception as e:
-        print(f"   [!] Update check failed: {e}")
+    except: pass
 
-def update_status(tid, msg):
-    WORKER_STATE[tid] = msg
+def update_status(tid, state, pct=0.0, info=""):
+    WORKER_STATE[tid] = {"state": state, "pct": pct, "info": info}
 
 def dashboard_loop():
+    # Progress Bar Characters
+    BAR_WIDTH = 30
+    BLOCK = "█"
+    EMPTY = "-"
+
     while not EXIT_FLAG.is_set():
         if STEALTH_MODE:
-            active_count = sum(1 for v in WORKER_STATE.values() if v != "Idle")
+            active_count = sum(1 for v in WORKER_STATE.values() if v['state'] != "Idle")
             sys.stdout.write(f"\r:: FRACTUM SECURITY :: SYSTEM LOAD: {active_count} ACTIVE PROCESSES" + " "*20)
+        
+        elif MAX_JOBS == 1:
+            # --- SINGLE JOB MODE (FANCY BAR) ---
+            data = WORKER_STATE["W1"]
+            state = data['state']
+            
+            if state == "Encoding":
+                pct = data['pct']
+                filled = int(BAR_WIDTH * pct / 100)
+                bar = BLOCK * filled + EMPTY * (BAR_WIDTH - filled)
+                # Output: [██████----] 60.5% | 24fps | ETA: 00h10m
+                sys.stdout.write(f"\r[{bar}] {pct:.2f}% | {data['info']}   ")
+            else:
+                # Idle / Downloading / Uploading
+                sys.stdout.write(f"\r>> STATUS: {state} {data['info']}" + " "*20)
+
         else:
+            # --- MULTI JOB MODE (COMPACT) ---
             status_line = ""
             for tid in sorted(WORKER_STATE.keys()):
-                status_line += f"[{tid}: {WORKER_STATE[tid]}] "
+                d = WORKER_STATE[tid]
+                val = f"{d['pct']:.0f}%" if d['state'] == "Encoding" else d['state']
+                status_line += f"[{tid}: {val}] "
             sys.stdout.write(f"\r{status_line}" + " "*10)
+        
         sys.stdout.flush()
         time.sleep(0.5)
 
@@ -154,8 +171,7 @@ def get_config():
     if args.user: config['username'] = args.user
     if args.worker: config['worker_name'] = args.worker
 
-    if 'username' in config and 'worker_name' in config:
-        return config
+    if 'username' in config and 'worker_name' in config: return config
 
     print("\n:: FIRST RUN CONFIGURATION ::")
     if 'username' not in config:
@@ -216,20 +232,9 @@ def retry_stashed():
 def heartbeat_loop(job_id, stop_event, tid):
     while not stop_event.is_set():
         try: 
-            # Get status, e.g., "45.25%"
-            raw_status = WORKER_STATE.get(tid, "0")
-            progress = 0
-            
-            if "%" in raw_status:
-                try:
-                    # 1. Remove the % sign
-                    clean_str = raw_status.replace("%", "").strip()
-                    # 2. Convert to Float (45.25), Round it (45), then make it Int (45)
-                    progress = int(float(clean_str))
-                except: 
-                    pass
-            
-            requests.post(f"{MANAGER_URL}/heartbeat", json={"id": job_id, "progress": progress}, headers=HEADERS, timeout=5)
+            # Safely grab float percent from state dict
+            pct = int(WORKER_STATE[tid]['pct'])
+            requests.post(f"{MANAGER_URL}/heartbeat", json={"id": job_id, "progress": pct}, headers=HEADERS, timeout=5)
         except: pass
         time.sleep(60)
 
@@ -252,7 +257,7 @@ def process(job, username):
 
     register_worker_activity(tid, job_id=job['id'], files=[local_input, local_output])
 
-    # SAFETY CHECK: Disk Space (10GB Buffer)
+    # SAFETY CHECK: Disk Space
     try:
         total, used, free = shutil.disk_usage(APP_DIR)
         if free < (10 * 1024 * 1024 * 1024): 
@@ -265,7 +270,7 @@ def process(job, username):
     except: pass
 
     # DOWNLOAD
-    update_status(tid, "Downld")
+    update_status(tid, "Downloading")
     download_success = False
     for attempt in range(3):
         try:
@@ -290,33 +295,41 @@ def process(job, username):
     hb_thread.start()
 
     try:
-        update_status(tid, "Start..")
+        update_status(tid, "Starting")
         with open(PRESET_FILE) as f: preset_name = json.load(f)['PresetList'][0]['PresetName']
         cmd = [HANDBRAKE_EXE, "--preset-import-file", PRESET_FILE, "-Z", preset_name, "-i", local_input, "-o", local_output]
         
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         register_worker_activity(tid, proc=proc)
         
-        full_log = ""
         for line in proc.stdout:
-            full_log += line
+            # Parse HandBrake Output for Rich Progress
             if "Encoding" in line:
                 try:
-                    parts = line.split(',')
-                    percent_part = [p for p in parts if "%" in p][0]
-                    clean_percent = percent_part.strip().split()[0]
-                    update_status(tid, f"{clean_percent}%")
+                    # Regex to find Percentage, FPS, and ETA
+                    # Sample: "Encoding: task 1 of 1, 45.50 % (24.12 fps, avg 24.00 fps, eta 00h05m00s)"
+                    pct_m = re.search(r"(\d+\.\d+) %", line)
+                    fps_m = re.search(r"(\d+\.\d+) fps", line)
+                    eta_m = re.search(r"eta (\w+)", line)
+
+                    pct = float(pct_m.group(1)) if pct_m else 0.0
+                    info_str = ""
+                    if fps_m: info_str += f"{fps_m.group(1)} fps"
+                    if eta_m: info_str += f" | ETA: {eta_m.group(1)}"
+                    
+                    update_status(tid, "Encoding", pct=pct, info=info_str)
                 except:
-                    update_status(tid, "Enc...")
+                    update_status(tid, "Encoding", pct=0.0, info="...")
+        
         proc.wait()
     finally:
         hb_stop.set(); hb_thread.join()
 
     # UPLOAD
-    update_status(tid, "Upload")
+    update_status(tid, "Uploading")
     uploaded = False
     meta = get_metadata(local_output)
-    job_payload = {"id": job['id'], "username": username, "metadata": meta, "encoding_log": full_log, 
+    job_payload = {"id": job['id'], "username": username, "metadata": meta, "encoding_log": "Log omitted", 
                    "local_path": local_output, "remote_name": real_output_name}
 
     if meta:
@@ -356,7 +369,7 @@ def worker_loop(config):
             data = r.json()
             if data['status'] == 'found': process(data, username)
             else: 
-                update_status(tid, "Wait..")
+                update_status(tid, "Waiting")
                 time.sleep(10)
         except: 
             update_status(tid, "Error")
