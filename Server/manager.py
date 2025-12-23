@@ -6,22 +6,25 @@ from ftplib import FTP
 from collections import deque
 
 # --- LOGGING INTERCEPTOR ---
-# This captures all console output to memory so we can view it on the web
 LOG_BUFFER = deque(maxlen=2000)
+
 class LogCapture:
     def __init__(self, stream):
         self.stream = stream
     def write(self, message):
         self.stream.write(message)
         self.stream.flush()
-        # Filter out empty newlines for the web view
         if message.strip():
             ts = datetime.datetime.now().strftime("%H:%M:%S")
-            LOG_BUFFER.append(f"[{ts}] {message.strip()}")
+            # Avoid double timestamping if the message already has one
+            if message.startswith("["): 
+                LOG_BUFFER.append(message.strip())
+            else:
+                LOG_BUFFER.append(f"[{ts}] {message.strip()}")
     def flush(self):
         self.stream.flush()
 
-# Redirect stdout and stderr to our capturer
+# Redirect stdout/stderr
 sys.stdout = LogCapture(sys.stdout)
 sys.stderr = LogCapture(sys.stderr)
 
@@ -30,7 +33,6 @@ CORS(app)
 
 DB_NAME = "queue.db"
 API_TOKEN = "FractumSecure2025"
-# [IMPORTANT] This is your password for the Admin Console
 ADMIN_TOKEN = os.environ.get("FRACTUM_ADMIN_TOKEN", "FractumAdmin2025")
 PRESET_FILE = "FractumAV1.json"
 
@@ -50,7 +52,7 @@ def add_security_headers(response):
 TOLERANCE_HEIGHT = 10 
 REQUEST_HISTORY = {}
 LIMIT_WINDOW = 60 
-MAX_REQUESTS = 100 
+MAX_REQUESTS = 200 # Increased for logs
 
 def check_rate_limit():
     ip = request.remote_addr
@@ -100,8 +102,6 @@ def validate_upload(metadata):
     uploaded_c = metadata.get('codec_name', '').lower()
     current, legacy_list = load_validation_rules()
     
-    print(f"[DEBUG] Validating: {uploaded_c}/{uploaded_h}p vs Target: {current['codec']}/{current['height']}p")
-    
     if (uploaded_c == current['codec'] and abs(uploaded_h - current['height']) <= TOLERANCE_HEIGHT):
         return True, "Valid (Current)"
     
@@ -126,13 +126,31 @@ def init_db():
 
 # --- ROUTES ---
 
-# Serve the Public Dashboard
 @app.route('/')
 def dashboard(): return send_from_directory('.', 'index.html')
 
-# Serve the Secure Admin Console
 @app.route('/admin')
 def admin_page(): return send_from_directory('.', 'admin.html')
+
+# [NEW] Remote Logging Endpoint
+@app.route('/log', methods=['POST'])
+@check_auth
+def remote_log():
+    data = request.json
+    worker = data.get('worker', 'Unknown')
+    msg = data.get('message', '')
+    level = data.get('level', 'INFO')
+    
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    formatted = f"[{ts}] [{worker}] [{level}] {msg}"
+    
+    # Store in memory buffer directly
+    LOG_BUFFER.append(formatted)
+    
+    # Also print to server console (optional, might get noisy)
+    # print(formatted) 
+    
+    return jsonify({"status": "ok"})
 
 @app.route('/get_job', methods=['POST'])
 @check_auth
@@ -303,6 +321,7 @@ def stats():
         c.execute("SELECT COALESCE(worker, 'Unknown'), filename, progress FROM jobs WHERE status='processing'")
         active = [{"user": r[0], "file": r[1], "progress": r[2]} for r in c.fetchall()]
     except: active = []
+    
     conn.close()
     return jsonify({"queue": queue_stats, "users": users, "active": active})
 
