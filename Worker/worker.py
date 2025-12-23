@@ -5,7 +5,7 @@ from ftplib import FTP
 from collections import deque
 
 # --- VERSION CONTROL ---
-VERSION = "2.2.3-DEBUG" 
+VERSION = "2.4.1" 
 GITHUB_REPO = "FractumSeraph/DistributedEncodes"
 RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/worker.py"
 RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -20,11 +20,13 @@ FTP_PASS = "transcode"
 
 # --- DEPENDENCY CONFIG ---
 WIN_HB_URL = "https://github.com/HandBrake/HandBrake/releases/download/1.10.2/HandBrakeCLI-1.10.2-win-x86_64.zip"
-WIN_FF_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+# [FIX] Switched to FULL build to ensure libsvtav1 is present
+WIN_FF_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.zip"
 
 # --- ARGUMENT PARSING ---
 parser = argparse.ArgumentParser()
 parser.add_argument("--stealth", action="store_true", help="Enable Stealth Mode")
+parser.add_argument("--debug", action="store_true", help="Enable Verbose Debug Logging")
 parser.add_argument("--jobs", type=int, default=1, help="Number of concurrent encodes")
 parser.add_argument("--no-update", action="store_true", help="Skip update check")
 parser.add_argument("-u", "--user", type=str, help="Set Username (Overrides config)")
@@ -33,6 +35,7 @@ parser.add_argument("--force-ffmpeg", action="store_true", help="Force FFmpeg ba
 args = parser.parse_args()
 
 STEALTH_MODE = args.stealth
+DEBUG_MODE = args.debug
 MAX_JOBS = args.jobs
 SKIP_UPDATE = args.no_update
 
@@ -43,14 +46,20 @@ RECOVERY_DIR = os.path.join(APP_DIR, "recovery")
 if not os.path.exists(RECOVERY_DIR): os.makedirs(RECOVERY_DIR)
 
 # --- PLATFORM SETUP ---
+# Default to system paths
 HANDBRAKE_EXE = "HandBrakeCLI"
 FFMPEG_EXE = "ffmpeg"
 FFPROBE_EXE = "ffprobe"
 
+# Override with local paths if on Windows or if they exist locally
 if platform.system() == "Windows":
     HANDBRAKE_EXE = os.path.join(APP_DIR, "HandBrakeCLI.exe")
     FFMPEG_EXE = os.path.join(APP_DIR, "ffmpeg.exe") 
     FFPROBE_EXE = os.path.join(APP_DIR, "ffprobe.exe")
+else:
+    # Linux/Mac: Check local folder first, then system
+    local_ff = os.path.join(APP_DIR, "ffmpeg")
+    if os.path.exists(local_ff): FFMPEG_EXE = local_ff
 
 ENCODER_BACKEND = None
 PRESET_FILE = os.path.join(APP_DIR, "FractumAV1.json")
@@ -63,10 +72,22 @@ WORKER_LOCK = threading.Lock()
 EXIT_FLAG = threading.Event()
 WORKER_STATE = {f"W{i+1}": {"state": "Idle", "pct": 0.0, "info": ""} for i in range(MAX_JOBS)}
 
-# --- DEBUG LOGGER ---
 def debug(msg):
-    ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] [DEBUG] {msg}")
+    if DEBUG_MODE:
+        ts = time.strftime("%H:%M:%S")
+        print(f"[{ts}] [DEBUG] {msg}")
+
+# --- ENCODER VERIFICATION ---
+def verify_encoder_support(binary_path, encoder_name):
+    """Checks if the given binary actually supports the required encoder"""
+    try:
+        cmd = [binary_path, "-encoders"]
+        output = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
+        if encoder_name in output:
+            return True
+        return False
+    except:
+        return False
 
 # --- BOOTSTRAP / INSTALLER LOGIC ---
 def is_admin():
@@ -87,10 +108,18 @@ def bootstrap_preset():
 
 def bootstrap_linux():
     print(":: BOOTSTRAP :: Checking Linux Dependencies...")
+    # Check if system ffmpeg is too old
+    if shutil.which("ffmpeg"):
+        if not verify_encoder_support("ffmpeg", "libsvtav1"):
+            print("   [!] System FFmpeg is too old (missing libsvtav1).")
+            print("   [!] Please install a static build from johnvansickle.com or use a newer distro.")
+            # We don't auto-install on Linux to avoid breaking system packages, but we warn loudly.
+    
     missing = []
     if not (shutil.which("HandBrakeCLI") or shutil.which("ffmpeg")):
         missing.append("encoders")
     if not missing: return
+    
     print("   [!] Missing dependencies detected. Attempting install...")
     if shutil.which("apt-get"): pkg_mgr, pkgs = "apt-get", ["handbrake-cli", "ffmpeg"]
     elif shutil.which("dnf"): pkg_mgr, pkgs = "dnf", ["HandBrake-cli", "ffmpeg"]
@@ -110,6 +139,8 @@ def bootstrap_linux():
 
 def bootstrap_windows():
     print(":: BOOTSTRAP :: Checking Windows Dependencies...")
+    
+    # 1. HandBrake
     if not os.path.exists(HANDBRAKE_EXE):
         print("   [+] Downloading HandBrakeCLI...")
         try:
@@ -120,18 +151,33 @@ def bootstrap_windows():
             os.remove("hb.zip")
         except: pass
 
+    # 2. FFmpeg (With AV1 Check)
+    need_ffmpeg_download = False
     if not os.path.exists(FFMPEG_EXE) or not os.path.exists(FFPROBE_EXE):
-        print("   [+] Downloading FFmpeg tools...")
+        need_ffmpeg_download = True
+    else:
+        # If it exists, verify it actually supports AV1. If not, delete and redownload.
+        if not verify_encoder_support(FFMPEG_EXE, "libsvtav1"):
+            print("   [!] Existing FFmpeg missing AV1 support. Updating...")
+            try: os.remove(FFMPEG_EXE)
+            except: pass
+            need_ffmpeg_download = True
+
+    if need_ffmpeg_download:
+        print("   [+] Downloading FFmpeg FULL build (High Quality)...")
         try:
             with urllib.request.urlopen(WIN_FF_URL) as r, open("ff.zip", 'wb') as f: shutil.copyfileobj(r, f)
             with zipfile.ZipFile("ff.zip", 'r') as z:
+                # Iterate to find the binaries inside the nested folder structure
                 for name in z.namelist():
                     if name.endswith("bin/ffmpeg.exe"):
                         with open(FFMPEG_EXE, "wb") as f: f.write(z.read(name))
                     elif name.endswith("bin/ffprobe.exe"):
                         with open(FFPROBE_EXE, "wb") as f: f.write(z.read(name))
             os.remove("ff.zip")
-        except: pass
+            print("   [+] FFmpeg updated.")
+        except Exception as e:
+            print(f"   [!] Download failed: {e}")
 
 def bootstrap_mac():
     print(":: BOOTSTRAP :: Checking macOS Dependencies...")
@@ -156,7 +202,66 @@ def check_for_updates():
         except: pass
 
     print(f":: SYSTEM :: Checking for updates (Current: {VERSION})...")
-    # ... (Update logic same as previous, omitted for brevity) ...
+    # -- PATH 1: COMPILED EXE UPDATE --
+    if getattr(sys, 'frozen', False):
+        try:
+            r = requests.get(RELEASE_API, timeout=5)
+            if r.status_code != 200: return
+            data = r.json()
+            remote_tag = data['tag_name'].lstrip('v')
+            
+            if remote_tag != VERSION:
+                print(f"   [!] New version found: {remote_tag}")
+                exe_url = None
+                for asset in data['assets']:
+                    if asset['name'].endswith(".exe"):
+                        exe_url = asset['browser_download_url']
+                        break
+                
+                if not exe_url: print("   [!] No exe asset found."); return
+
+                print("   [+] Downloading update...")
+                new_exe = sys.executable + ".new"
+                with requests.get(exe_url, stream=True) as r:
+                    with open(new_exe, 'wb') as f: shutil.copyfileobj(r.raw, f)
+                
+                print("   [+] Installing...")
+                old_exe = sys.executable + ".old"
+                if os.path.exists(old_exe): os.remove(old_exe)
+                os.rename(sys.executable, old_exe)
+                os.rename(new_exe, sys.executable)
+                
+                print("   [+] Restarting...")
+                subprocess.Popen([sys.executable] + sys.argv[1:])
+                sys.exit(0)
+            else:
+                print("   [OK] System is up to date.")
+        except Exception as e:
+            print(f"   [!] Update check failed: {e}")
+
+    # -- PATH 2: PYTHON SCRIPT UPDATE --
+    else:
+        try:
+            r = requests.get(RAW_URL, timeout=5)
+            if r.status_code != 200: return
+            remote_code = r.text
+            match = re.search(r'VERSION\s*=\s*"([^"]+)"', remote_code)
+            if not match: return
+            remote_version = match.group(1)
+            
+            if remote_version != VERSION:
+                print(f"   [!] New version found: {remote_version}")
+                print(f"   [+] Installing update...")
+                script_path = os.path.abspath(__file__)
+                shutil.copy2(script_path, script_path + ".bak")
+                with open(script_path, 'w', encoding='utf-8') as f:
+                    f.write(remote_code)
+                print("   [+] Restarting...")
+                time.sleep(1)
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            else:
+                print("   [OK] System is up to date.")
+        except: pass
 
 # --- DASHBOARD & UTILS ---
 def update_status(tid, state, pct=0.0, info=""):
@@ -247,32 +352,27 @@ def get_config():
     with open(CONFIG_FILE, 'w') as f: json.dump(config, f)
     return config
 
-# --- DEBUGGED METADATA FETCHER ---
 def get_metadata(path):
     debug(f"Probing file: {path}")
-    
     if not os.path.exists(path):
         debug(f"METADATA FAIL: File does not exist -> {path}")
         return None
-    
-    # Check for 0-byte files (Corruption)
     size = os.path.getsize(path)
     if size == 0:
         debug(f"METADATA FAIL: File is 0 bytes -> {path}")
         return None
     
     debug(f"File size: {size} bytes")
-
-    cmd = [FFPROBE_EXE, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height,codec_name", "-show_entries", "format=duration", "-of", "json", path]
+    # [FIX] Force use of the local binary if on Windows
+    cmd_exe = FFPROBE_EXE if platform.system() == "Windows" else "ffprobe"
+    cmd = [cmd_exe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height,codec_name", "-show_entries", "format=duration", "-of", "json", path]
     try:
-        # We capture stderr here so we can see why ffprobe is unhappy
         data_json = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
-        debug(f"FFPROBE RAW OUTPUT: {data_json}") # Log the raw output
-        
+        debug(f"FFPROBE RAW OUTPUT: {data_json}")
         data = json.loads(data_json)
         return {"height": int(data['streams'][0]['height']), "codec_name": data['streams'][0]['codec_name'], "duration": float(data['format']['duration'])}
     except subprocess.CalledProcessError as e:
-        debug(f"FFPROBE ERROR: {e.output}") # Prints the exact error from ffprobe
+        debug(f"FFPROBE ERROR: {e.output}")
         return None
     except Exception as e: 
         debug(f"METADATA EXCEPTION: {e}")
@@ -359,8 +459,9 @@ def build_encode_cmd(input_file, output_file):
     speed = preset.get('VideoPreset', '2') 
     
     if ENCODER_BACKEND == "handbrake":
-        # Force Verbose logging (-v 1) for debugging
-        return [HANDBRAKE_EXE, "-v", "1", "--preset-import-file", PRESET_FILE, "-Z", preset.get('PresetName', 'FractumAV1'), "-i", input_file, "-o", output_file]
+        # Enable verbose logging only if --debug is set
+        verbosity = "1" if DEBUG_MODE else "0"
+        return [HANDBRAKE_EXE, "-v", verbosity, "--preset-import-file", PRESET_FILE, "-Z", preset.get('PresetName', 'FractumAV1'), "-i", input_file, "-o", output_file]
     else:
         cmd = [FFMPEG_EXE, "-y", "-v", "error", "-stats", "-i", input_file]
         cmd += ["-c:v", "libsvtav1", "-preset", str(speed), "-crf", str(rf)]
@@ -374,7 +475,6 @@ def process(job, username):
     tid = threading.current_thread().name
     job_path = job['filename'].replace("\\", "/")
     
-    # Force .mp4 extension
     flat_name = job_path.replace("/", "_")
     name_no_ext = os.path.splitext(flat_name)[0]
     real_output_name = f"av1_{name_no_ext}.mp4"
@@ -387,7 +487,6 @@ def process(job, username):
 
     register_worker_activity(tid, job_id=job['id'], files=[local_input, local_output])
 
-    # 1. Download Phase
     update_status(tid, "Downloading")
     download_success = False
     for attempt in range(3):
@@ -420,13 +519,11 @@ def process(job, username):
         if not EXIT_FLAG.is_set(): requests.post(f"{MANAGER_URL}/fail_job", json={"id": job['id'], "reason": "Download Failed"}, headers=HEADERS)
         clear_worker_activity(tid); update_status(tid, "Idle"); return
 
-    # [DEBUG] Check input size
     if os.path.getsize(local_input) < 1024:
         debug(f"Input file is suspiciously small: {os.path.getsize(local_input)} bytes")
 
     if EXIT_FLAG.is_set(): return
 
-    # 2. Encode Phase
     total_duration_sec = 0
     if ENCODER_BACKEND == "ffmpeg":
         meta_in = get_metadata(local_input)
@@ -436,7 +533,6 @@ def process(job, username):
     hb_thread = threading.Thread(target=heartbeat_loop, args=(job['id'], hb_stop, tid), daemon=True)
     hb_thread.start()
 
-    # [DEBUG] Capture log for crash dump
     recent_logs = deque(maxlen=50)
 
     try:
@@ -448,11 +544,10 @@ def process(job, username):
         register_worker_activity(tid, proc=proc)
         
         for line in proc.stdout:
-            recent_logs.append(line.strip()) # Capture output
+            recent_logs.append(line.strip())
             if EXIT_FLAG.is_set(): proc.kill(); break
             pct = 0.0
             info_str = "..."
-            # ... (Progress parsing logic same as before) ...
             if ENCODER_BACKEND == "handbrake" and "Encoding" in line:
                 try:
                     pct_m = re.search(r"(\d+\.\d+) %", line)
@@ -480,7 +575,6 @@ def process(job, username):
 
     if EXIT_FLAG.is_set(): return
 
-    # 3. Verification Phase
     debug(f"Encoding complete. Checking output file: {local_output}")
     if os.path.exists(local_output):
         sz = os.path.getsize(local_output)
@@ -490,22 +584,17 @@ def process(job, username):
 
     meta = get_metadata(local_output)
     
-    # [DEBUG] Dump logs if meta is invalid
     if not meta:
         log(f"\n[!] ENCODER CRASH DUMP FOR JOB {job['id']} [!]")
         log("------------------------------------------------")
         for line in recent_logs:
             log(line)
         log("------------------------------------------------")
-        
-        # Report specific error to server
         requests.post(f"{MANAGER_URL}/fail_job", json={"id": job['id'], "reason": "Output Invalid/Crash"}, headers=HEADERS)
-        
         try: os.remove(local_input)
         except: pass
         clear_worker_activity(tid); update_status(tid, "Idle"); return
 
-    # 4. Upload Phase
     update_status(tid, "Uploading")
     uploaded = False
     job_payload = {"id": job['id'], "username": username, "metadata": meta, "encoding_log": "Log omitted", "local_path": local_output, "remote_name": real_output_name}
