@@ -1,14 +1,36 @@
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
-import sqlite3, os, datetime, time, json
+import sqlite3, os, datetime, time, json, sys
 from functools import wraps
 from ftplib import FTP
+from collections import deque
+
+# --- LOGGING INTERCEPTOR ---
+# This captures all console output to memory so we can view it on the web
+LOG_BUFFER = deque(maxlen=2000)
+class LogCapture:
+    def __init__(self, stream):
+        self.stream = stream
+    def write(self, message):
+        self.stream.write(message)
+        self.stream.flush()
+        # Filter out empty newlines for the web view
+        if message.strip():
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            LOG_BUFFER.append(f"[{ts}] {message.strip()}")
+    def flush(self):
+        self.stream.flush()
+
+# Redirect stdout and stderr to our capturer
+sys.stdout = LogCapture(sys.stdout)
+sys.stderr = LogCapture(sys.stderr)
 
 app = Flask(__name__)
 CORS(app) 
 
 DB_NAME = "queue.db"
 API_TOKEN = "FractumSecure2025"
+# [IMPORTANT] This is your password for the Admin Console
 ADMIN_TOKEN = os.environ.get("FRACTUM_ADMIN_TOKEN", "FractumAdmin2025")
 PRESET_FILE = "FractumAV1.json"
 
@@ -51,7 +73,6 @@ def check_auth(f):
     return decorated
 
 def load_validation_rules():
-    # Strictly load from JSON. Default to AV1/480p if missing.
     current = {"height": 480, "codec": "av1"} 
     if os.path.exists(PRESET_FILE):
         try:
@@ -64,7 +85,6 @@ def load_validation_rules():
                 elif '265' in enc or 'hevc' in enc: current['codec'] = 'hevc'
         except: pass
     
-    # [REVERTED] Removed VP9/H264 from valid list.
     legacy = [
         {"height": 480, "codec": "av1"}, 
         {"height": 480, "codec": "hevc"}
@@ -73,22 +93,19 @@ def load_validation_rules():
 
 def validate_upload(metadata):
     if not metadata: 
-        print("[DEBUG] Validation failed: No metadata dictionary provided.")
+        print("[DEBUG] Validation failed: No metadata.")
         return False, "No metadata"
     
-    print(f"[DEBUG] Validating Metadata: {metadata}")
     uploaded_h = int(metadata.get('height', 0))
     uploaded_c = metadata.get('codec_name', '').lower()
     current, legacy_list = load_validation_rules()
     
-    # Check Current
-    print(f"[DEBUG] Checking against CURRENT: {current['codec']}/{current['height']}p (Tolerance: {TOLERANCE_HEIGHT})")
+    print(f"[DEBUG] Validating: {uploaded_c}/{uploaded_h}p vs Target: {current['codec']}/{current['height']}p")
+    
     if (uploaded_c == current['codec'] and abs(uploaded_h - current['height']) <= TOLERANCE_HEIGHT):
         return True, "Valid (Current)"
     
-    # Check Legacy
-    for i, rules in enumerate(legacy_list):
-        print(f"[DEBUG] Checking against LEGACY[{i}]: {rules['codec']}/{rules['height']}p")
+    for rules in legacy_list:
         if (uploaded_c == rules['codec'] and abs(uploaded_h - rules['height']) <= TOLERANCE_HEIGHT):
             return True, "Valid (Legacy)"
             
@@ -107,51 +124,15 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- BRIDGE ROUTES ---
+# --- ROUTES ---
 
-@app.route('/bridge/download/<path:filename>')
-def bridge_download(filename):
-    def generate():
-        ftp = FTP(FTP_HOST)
-        ftp.login(FTP_USER, FTP_PASS)
-        try:
-            ftp.cwd("source")
-            if "/" in filename:
-                d = os.path.dirname(filename)
-                if d: 
-                    for folder in d.split("/"):
-                        try: ftp.cwd(folder)
-                        except: pass
-            base_name = os.path.basename(filename)
-            with ftp.transfercmd(f"RETR {base_name}") as data_sock:
-                while True:
-                    chunk = data_sock.recv(8192)
-                    if not chunk: break
-                    yield chunk
-        except Exception as e:
-            print(f"Bridge Download Error: {e}")
-        finally:
-            try: ftp.quit()
-            except: pass
-
-    return Response(stream_with_context(generate()), mimetype="video/mp4")
-
-@app.route('/bridge/upload/<filename>', methods=['POST'])
-def bridge_upload(filename):
-    ftp = FTP(FTP_HOST)
-    ftp.login(FTP_USER, FTP_PASS)
-    try:
-        ftp.cwd("completed")
-        ftp.storbinary(f"STOR {filename}", request.stream)
-        ftp.quit()
-        return jsonify({"status": "uploaded"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# --- API ROUTES ---
-
+# Serve the Public Dashboard
 @app.route('/')
 def dashboard(): return send_from_directory('.', 'index.html')
+
+# Serve the Secure Admin Console
+@app.route('/admin')
+def admin_page(): return send_from_directory('.', 'admin.html')
 
 @app.route('/get_job', methods=['POST'])
 @check_auth
@@ -163,6 +144,7 @@ def get_job():
     cutoff = int(time.time()) - (4 * 3600)
     c.execute("UPDATE jobs SET status='pending', worker=NULL, progress=0 WHERE status='processing' AND start_time < ?", (cutoff,))
     conn.commit()
+    
     c.execute("SELECT id, filename FROM jobs WHERE status='pending' ORDER BY id ASC LIMIT 1")
     job = c.fetchone()
     if job:
@@ -170,6 +152,7 @@ def get_job():
         c.execute("UPDATE jobs SET status='processing', worker=?, start_time=?, progress=0 WHERE id=?", (worker_name, int(time.time()), job_id))
         conn.commit()
         conn.close()
+        print(f"[JOB ASSIGNED] Job {job_id} assigned to {worker_name}")
         return jsonify({"status": "found", "id": job_id, "filename": filename})
     conn.close()
     return jsonify({"status": "empty"})
@@ -195,20 +178,25 @@ def complete_job():
     metadata = data.get('metadata')
     
     is_valid, msg = validate_upload(metadata)
-    if not is_valid: print(f"[!] Validation Warning for Job {job_id}: {msg}")
+    if not is_valid: 
+        print(f"[!] REJECTED Job {job_id} from {username}: {msg}")
+        return jsonify({"status": "error", "message": msg}), 400
 
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("UPDATE jobs SET status='completed', end_time=?, progress=100 WHERE id=?", (int(time.time()), job_id))
     c.execute("INSERT OR IGNORE INTO users (username) VALUES (?)", (username,))
+    
     duration = 5
     if metadata and 'duration' in metadata:
         try: duration = float(metadata['duration']) / 60
         except: pass
+        
     c.execute("UPDATE users SET total_minutes = total_minutes + ?, jobs_completed = jobs_completed + 1 WHERE username=?", (duration, username))
     c.execute("INSERT INTO work_log (username, duration_minutes, timestamp) VALUES (?, ?, ?)", (username, duration, int(time.time())))
     conn.commit()
     conn.close()
+    print(f"[COMPLETED] Job {job_id} finished by {username} ({duration:.1f}m)")
     return jsonify({"status": "success"})
 
 @app.route('/fail_job', methods=['POST'])
@@ -217,13 +205,74 @@ def fail_job():
     data = request.json
     reason = data.get('reason', 'Unknown')
     job_id = data.get('id')
-    print(f"[!] Job {job_id} FAILED. Reason: {reason}")
+    # Use standard logging so it appears in the admin console
+    print(f"[! WORKER ERROR !] Job {job_id} FAILED. Reason: {reason}")
     
     conn = sqlite3.connect(DB_NAME)
     conn.execute("UPDATE jobs SET status='pending', worker=NULL, progress=0 WHERE id=?", (job_id,))
     conn.commit()
     conn.close()
     return jsonify({"status": "reset"})
+
+# --- SECURE ADMIN ENDPOINTS ---
+
+@app.route('/admin/logs', methods=['GET'])
+def admin_logs():
+    token = request.headers.get("X-Admin-Token")
+    if token != ADMIN_TOKEN:
+        return jsonify({"error": "Unauthorized"}), 403
+    return jsonify({"logs": list(LOG_BUFFER)})
+
+@app.route('/admin/reset', methods=['GET'])
+def admin_reset():
+    user_token = request.args.get('token')
+    if not user_token or user_token != ADMIN_TOKEN: return "Unauthorized", 403
+    job_id = request.args.get('id')
+    if not job_id: return "Missing ID", 400
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute("UPDATE jobs SET status='pending', worker=NULL, progress=0 WHERE id=?", (job_id,))
+    conn.commit()
+    conn.close()
+    print(f"[ADMIN ACTION] Job {job_id} manually reset.")
+    return f"Job {job_id} reset to pending."
+
+@app.route('/bridge/download/<path:filename>')
+def bridge_download(filename):
+    def generate():
+        ftp = FTP(FTP_HOST)
+        ftp.login(FTP_USER, FTP_PASS)
+        try:
+            ftp.cwd("source")
+            if "/" in filename:
+                d = os.path.dirname(filename)
+                if d: 
+                    for folder in d.split("/"):
+                        try: ftp.cwd(folder)
+                        except: pass
+            base_name = os.path.basename(filename)
+            with ftp.transfercmd(f"RETR {base_name}") as data_sock:
+                while True:
+                    chunk = data_sock.recv(8192)
+                    if not chunk: break
+                    yield chunk
+        except Exception as e:
+            print(f"Bridge Download Error: {e}")
+        finally:
+            try: ftp.quit()
+            except: pass
+    return Response(stream_with_context(generate()), mimetype="video/mp4")
+
+@app.route('/bridge/upload/<filename>', methods=['POST'])
+def bridge_upload(filename):
+    ftp = FTP(FTP_HOST)
+    ftp.login(FTP_USER, FTP_PASS)
+    try:
+        ftp.cwd("completed")
+        ftp.storbinary(f"STOR {filename}", request.stream)
+        ftp.quit()
+        return jsonify({"status": "uploaded"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/stats', methods=['GET'])
 def stats():
@@ -238,16 +287,17 @@ def stats():
         "processing": counts.get('processing', 0) + counts.get('PROCESSING', 0),
         "done": counts.get('completed', 0) + counts.get('DONE', 0)
     }
-    if filter_type == '24h':
-        cutoff = int(time.time()) - 86400
-        c.execute('''SELECT username, SUM(duration_minutes) as time, COUNT(*) as count 
-                     FROM work_log WHERE timestamp > ? GROUP BY username ORDER BY time DESC''', (cutoff,))
-    elif filter_type == '30d':
-        cutoff = int(time.time()) - (30 * 86400)
+    
+    cutoff = 0
+    if filter_type == '24h': cutoff = int(time.time()) - 86400
+    elif filter_type == '30d': cutoff = int(time.time()) - (30 * 86400)
+    
+    if cutoff > 0:
         c.execute('''SELECT username, SUM(duration_minutes) as time, COUNT(*) as count 
                      FROM work_log WHERE timestamp > ? GROUP BY username ORDER BY time DESC''', (cutoff,))
     else:
         c.execute("SELECT username, total_minutes, jobs_completed FROM users ORDER BY total_minutes DESC")
+        
     users = [{"name": r[0], "time": round(r[1] or 0, 1), "count": r[2]} for r in c.fetchall()]
     try:
         c.execute("SELECT COALESCE(worker, 'Unknown'), filename, progress FROM jobs WHERE status='processing'")
@@ -255,18 +305,6 @@ def stats():
     except: active = []
     conn.close()
     return jsonify({"queue": queue_stats, "users": users, "active": active})
-
-@app.route('/admin/reset', methods=['GET'])
-def admin_reset():
-    user_token = request.args.get('token')
-    if not user_token or user_token != ADMIN_TOKEN: return "Unauthorized", 403
-    job_id = request.args.get('id')
-    if not job_id: return "Missing ID", 400
-    conn = sqlite3.connect(DB_NAME)
-    conn.execute("UPDATE jobs SET status='pending', worker=NULL, progress=0 WHERE id=?", (job_id,))
-    conn.commit()
-    conn.close()
-    return f"Job {job_id} reset to pending."
 
 if __name__ == '__main__':
     init_db()
