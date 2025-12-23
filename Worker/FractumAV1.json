@@ -6,6 +6,7 @@
       "AudioEncoderFallback": "opus",
       "AudioLanguageList": [
         "eng",
+        "jpn",
         "any"
       ],
       "AudioList": [
@@ -22,7 +23,7 @@
           "AudioTrackDRCSlider": 0
         }
       ],
-      "AudioSecondaryEncoderMode": true,
+      "AudioSecondaryEncoderMode": false,
       "AudioTrackSelectionBehavior": "first",
       "AudioTrackNamePassthru": true,
       "AudioAutomaticNamingBehavior": "unnamed",
