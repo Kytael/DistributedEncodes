@@ -4,7 +4,7 @@ import zipfile
 from ftplib import FTP
 
 # --- VERSION CONTROL ---
-VERSION = "2.2.0" 
+VERSION = "2.2.1" 
 GITHUB_REPO = "FractumSeraph/DistributedEncodes"
 # For Script Users (Linux/Mac)
 RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/worker.py"
@@ -408,7 +408,12 @@ def process(job, username):
     if EXIT_FLAG.is_set(): return
     tid = threading.current_thread().name
     job_path = job['filename'].replace("\\", "/")
-    real_output_name = "av1_" + job_path.replace("/", "_")
+    
+    # [FIX] Force .mp4 extension regardless of source
+    flat_name = job_path.replace("/", "_")
+    name_no_ext = os.path.splitext(flat_name)[0]
+    real_output_name = f"av1_{name_no_ext}.mp4"
+    
     local_input = f"{tid}_{os.path.basename(job_path)}"
     local_output = f"{tid}_{real_output_name}"
 
