@@ -11,7 +11,7 @@ RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/worker.py"
 # For EXE Users (Windows)
 RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
-PRESET_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/FractumAV1.json"
+PRESET_URL = "https://raw.githubusercontent.com/FractumSeraph/DistributedEncodes/refs/heads/main/Worker/FractumAV1.json"
 
 # [CHANGE ME] Connection Config
 MANAGER_URL = "http://transcode.fractumseraph.net:5000"
@@ -597,3 +597,4 @@ def main():
         graceful_exit(None, None)
 
 if __name__ == "__main__": main()
+
