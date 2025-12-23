@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import sqlite3, os, datetime, time, threading
+import sqlite3, os, datetime, time, json
 from functools import wraps
 
 app = Flask(__name__)
@@ -8,13 +8,17 @@ CORS(app)
 
 DB_NAME = "queue.db"
 API_TOKEN = "FractumSecure2025"
-# Optional: Add your Admin Token here if you use the reset tool
 ADMIN_TOKEN = os.environ.get("FRACTUM_ADMIN_TOKEN", "FractumAdmin2025")
+PRESET_FILE = "FractumAV1.json"
+
+# --- CONFIGURATION ---
+# Tolerance allows for slight variations (e.g., 478p instead of 480p)
+TOLERANCE_HEIGHT = 10 
 
 # --- SECURITY: RATE LIMITER ---
 REQUEST_HISTORY = {}
 LIMIT_WINDOW = 60 
-MAX_REQUESTS = 30 
+MAX_REQUESTS = 60 # Increased slightly for active farms
 
 def check_rate_limit():
     ip = request.remote_addr
@@ -39,6 +43,58 @@ def check_auth(f):
         return f(*args, **kwargs)
     return decorated
 
+def load_validation_rules():
+    """
+    Loads the current preset to verify uploads.
+    Also defines a LEGACY fallback to accept older jobs if settings change.
+    """
+    # 1. Current Rules (from JSON)
+    current = {"height": 480, "codec": "av1"} # Defaults
+    if os.path.exists(PRESET_FILE):
+        try:
+            with open(PRESET_FILE, 'r') as f:
+                data = json.load(f)
+                preset = data['PresetList'][0]
+                current['height'] = int(preset.get('PictureHeight', 480))
+                # Map encoder names to ffprobe codec names if needed
+                enc = preset.get('VideoEncoder', 'svt_av1')
+                if 'av1' in enc: current['codec'] = 'av1'
+                elif '265' in enc or 'hevc' in enc: current['codec'] = 'hevc'
+        except: pass
+
+    # 2. Legacy Rules (Hardcoded fallback for older workers)
+    # If you change the JSON to 720p, these rules ensure 480p is still accepted.
+    legacy = [
+        {"height": 480, "codec": "av1"},
+        {"height": 480, "codec": "hevc"} # Example: allow HEVC if you used it before
+    ]
+    
+    return current, legacy
+
+def validate_upload(metadata):
+    """
+    Checks if the uploaded file matches EITHER the current preset OR legacy rules.
+    """
+    if not metadata: return False, "No metadata"
+    
+    uploaded_h = int(metadata.get('height', 0))
+    uploaded_c = metadata.get('codec_name', '').lower()
+    
+    current, legacy_list = load_validation_rules()
+    
+    # Check Current
+    if (uploaded_c == current['codec'] and 
+        abs(uploaded_h - current['height']) <= TOLERANCE_HEIGHT):
+        return True, "Valid (Current)"
+
+    # Check Legacy
+    for rules in legacy_list:
+        if (uploaded_c == rules['codec'] and 
+            abs(uploaded_h - rules['height']) <= TOLERANCE_HEIGHT):
+            return True, "Valid (Legacy)"
+
+    return False, f"Mismatch: Got {uploaded_c}/{uploaded_h}p, Expected {current['codec']}/{current['height']}p"
+
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -52,7 +108,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS work_log 
                  (id INTEGER PRIMARY KEY, username TEXT, duration_minutes REAL, timestamp INTEGER)''')
     
-    # 2. COLUMNS MIGRATION
+    # 2. Migrations
     c.execute("PRAGMA table_info(jobs)")
     columns = [info[1] for info in c.fetchall()]
     for col, dtype in {'worker': 'TEXT', 'progress': 'INTEGER DEFAULT 0', 'start_time': 'INTEGER', 'end_time': 'INTEGER'}.items():
@@ -60,7 +116,6 @@ def init_db():
             try: c.execute(f"ALTER TABLE jobs ADD COLUMN {col} {dtype}")
             except: pass
 
-    # 3. STATUS MIGRATION
     try:
         c.execute("UPDATE jobs SET status='pending' WHERE status='PENDING'")
         c.execute("UPDATE jobs SET status='completed' WHERE status='DONE'")
@@ -73,10 +128,8 @@ def init_db():
 
 # --- ROUTES ---
 
-# [RESTORED] Serve the Dashboard
 @app.route('/')
 def dashboard():
-    # Serves index.html from the current directory
     return send_from_directory('.', 'index.html')
 
 @app.route('/get_job', methods=['POST'])
@@ -87,7 +140,6 @@ def get_job():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # Reset stale jobs (>4 hours)
     cutoff = int(time.time()) - (4 * 3600)
     c.execute("UPDATE jobs SET status='pending', worker=NULL, progress=0 WHERE status='processing' AND start_time < ?", (cutoff,))
     conn.commit()
@@ -114,14 +166,7 @@ def heartbeat():
     except: progress = 0
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    
-    # Revive "invisible" jobs
-    c.execute("""
-        UPDATE jobs 
-        SET start_time=?, progress=?, status='processing' 
-        WHERE id=? AND status != 'completed'
-    """, (int(time.time()), progress, data['id']))
-    
+    c.execute("UPDATE jobs SET start_time=?, progress=?, status='processing' WHERE id=? AND status != 'completed'", (int(time.time()), progress, data['id']))
     conn.commit()
     conn.close()
     return jsonify({"status": "ok"})
@@ -133,7 +178,8 @@ def complete_job():
     job_id = data.get('id')
     username = data.get('username')
     metadata = data.get('metadata')
-    if not job_id or not username: return jsonify({"status": "error"}), 400
+    
+    if not job_id or not username: return jsonify({"status": "error", "message": "Missing data"}), 400
 
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -142,6 +188,13 @@ def complete_job():
     row = c.fetchone()
     if not row or row[1] == 'completed':
         conn.close(); return jsonify({"status": "error", "message": "Invalid job state"}), 400
+
+    # --- RESTORED VALIDATION ---
+    is_valid, msg = validate_upload(metadata)
+    if not is_valid:
+        print(f"[!] Validation Failed for Job {job_id} ({username}): {msg}")
+        # Uncomment the line below to strictly REJECT invalid jobs
+        # conn.close(); return jsonify({"status": "error", "message": msg}), 400
 
     duration_min = 0
     if metadata and 'duration' in metadata:
@@ -172,15 +225,13 @@ def fail_job():
 def populate():
     files = request.json.get('files', [])
     if not files: return jsonify({"added": 0})
-    
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     count = 0
     for item in files:
         c.execute("SELECT id FROM jobs WHERE filename = ?", (item['filename'],))
         if not c.fetchone():
-            c.execute("INSERT INTO jobs (filename, status, start_time, progress) VALUES (?, 'pending', 0, 0)", 
-                      (item['filename'],))
+            c.execute("INSERT INTO jobs (filename, status, start_time, progress) VALUES (?, 'pending', 0, 0)", (item['filename'],))
             count += 1
     conn.commit()
     conn.close()
@@ -217,22 +268,17 @@ def stats():
     try:
         c.execute("SELECT COALESCE(worker, 'Unknown'), filename, progress FROM jobs WHERE status='processing'")
         active = [{"user": r[0], "file": r[1], "progress": r[2]} for r in c.fetchall()]
-    except:
-        active = []
+    except: active = []
     
     conn.close()
     return jsonify({"queue": queue_stats, "users": users, "active": active})
 
-# [RESTORED] Admin Reset Tool
 @app.route('/admin/reset', methods=['GET'])
 def admin_reset():
     user_token = request.args.get('token')
-    if not user_token or user_token != ADMIN_TOKEN:
-        return "Unauthorized", 403
-    
+    if not user_token or user_token != ADMIN_TOKEN: return "Unauthorized", 403
     job_id = request.args.get('id')
     if not job_id: return "Missing ID", 400
-    
     conn = sqlite3.connect(DB_NAME)
     conn.execute("UPDATE jobs SET status='pending', worker=NULL, progress=0 WHERE id=?", (job_id,))
     conn.commit()
