@@ -35,7 +35,6 @@
         }
         .title { color: var(--neon-red); font-size: 1.5em; font-weight: bold; }
         
-        /* Login Overlay */
         #login-overlay {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: #000; z-index: 999;
@@ -47,6 +46,10 @@
             color: var(--text-light); padding: 10px; font-family: var(--font);
             font-size: 1.2em; width: 300px; text-align: center; margin-bottom: 20px;
         }
+        .filter-input {
+            width: 200px; font-size: 0.9em; margin-bottom: 0; margin-left: 20px;
+            border-color: var(--text-dim);
+        }
         button {
             background: var(--neon-red); color: black; border: none;
             padding: 10px 30px; font-family: var(--font); font-weight: bold;
@@ -54,7 +57,6 @@
         }
         button:hover { background: white; }
 
-        /* Console Window */
         #console-window {
             flex: 1;
             background: #0a0a0a;
@@ -81,7 +83,10 @@
     </div>
 
     <div class="header">
-        <div class="title">// MANAGER_CONSOLE</div>
+        <div style="display:flex; align-items:center;">
+            <div class="title">// MANAGER_CONSOLE</div>
+            <input type="text" id="filterInput" class="filter-input" placeholder="FILTER LOGS..." onkeyup="applyFilter()">
+        </div>
         <div>
             STATUS: <span id="status" style="color:var(--neon-red)">DISCONNECTED</span>
             <button onclick="clearLogs()" style="font-size:0.8em; padding:5px 10px; margin-left:10px;">CLEAR</button>
@@ -93,18 +98,16 @@
     <script>
         let AUTH_TOKEN = "";
         let isAutoScrolling = true;
+        let allLogs = [];
         const consoleWin = document.getElementById('console-window');
 
         function authenticate() {
             const token = document.getElementById('tokenInput').value;
             if (!token) return alert("Token required");
             AUTH_TOKEN = token;
-            
-            // Test connection
             fetchLogs();
         }
 
-        // Detect if user scrolled up (to stop auto-scroll)
         consoleWin.addEventListener('scroll', () => {
             if (consoleWin.scrollTop + consoleWin.clientHeight >= consoleWin.scrollHeight - 50) {
                 isAutoScrolling = true;
@@ -125,15 +128,14 @@
                     return;
                 }
 
-                // If success, hide login
                 document.getElementById('login-overlay').style.display = 'none';
                 document.getElementById('status').innerText = "LIVE";
                 document.getElementById('status').style.color = "var(--neon-green)";
 
                 const data = await res.json();
-                renderLogs(data.logs);
+                allLogs = data.logs; // Store raw logs
+                applyFilter(); // Render with current filter
 
-                // Poll again in 2 seconds
                 setTimeout(fetchLogs, 2000);
 
             } catch (e) {
@@ -141,6 +143,12 @@
                 document.getElementById('status').innerText = "ERROR";
                 setTimeout(fetchLogs, 5000);
             }
+        }
+
+        function applyFilter() {
+            const filterText = document.getElementById('filterInput').value.toLowerCase();
+            const filtered = allLogs.filter(l => l.toLowerCase().includes(filterText));
+            renderLogs(filtered);
         }
 
         function renderLogs(logs) {
@@ -163,7 +171,6 @@
             consoleWin.innerHTML = "";
         }
         
-        // Allow Enter key on login
         document.getElementById("tokenInput").addEventListener("keyup", function(event) {
             if (event.key === "Enter") authenticate();
         });
