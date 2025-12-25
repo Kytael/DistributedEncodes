@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Encode Admin</title>
+    <style>
+        body { font-family: sans-serif; background: #121212; color: #e0e0e0; padding: 20px; }
+        h1 { color: #f44336; border-bottom: 1px solid #333; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 12px; border-bottom: 1px solid #333; text-align: left; }
+        .status-failed { color: #f44336; font-weight: bold; }
+        .status-completed { color: #4CAF50; }
+        button { padding: 5px 10px; border: none; cursor: pointer; color: white; margin-right: 5px; }
+        .btn-retry { background: #4CAF50; } .btn-delete { background: #f44336; }
+        a { color: #4CAF50; text-decoration: none; font-size: 1.1em; }
+    </style>
+    <script>
+        function loadJobs() {
+            fetch('/api/all_jobs').then(r => r.json()).then(data => {
+                let html = "";
+                data.jobs.forEach(j => {
+                    html += `<tr><td>${j.id}</td><td class="status-${j.status}">${j.status}</td><td>
+                    ${(j.status === 'failed' || j.status === 'completed') ? `<button class="btn-retry" onclick="act('${j.id}','retry')">Retry</button>` : ''}
+                    <button class="btn-delete" onclick="act('${j.id}','delete')">Delete</button></td></tr>`;
+                });
+                document.getElementById('list').innerHTML = html;
+            });
+        }
+        function act(id, action) {
+            if(confirm(action + " " + id + "?")) {
+                fetch('/api/admin_action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({job_id:id, action:action})}).then(()=>loadJobs());
+            }
+        }
+        window.onload = loadJobs;
+    </script>
+</head>
+<body>
+    <a href="/">← Dashboard</a>
+    <h1>Job Administration</h1>
+    <table><thead><tr><th>File</th><th>Status</th><th>Actions</th></tr></thead><tbody id="list"></tbody></table>
+</body>
+</html>
