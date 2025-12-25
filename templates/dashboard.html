@@ -33,7 +33,9 @@
 
                 let activeHtml = "";
                 data.active.forEach(j => {
-                    activeHtml += `<tr><td>${j.worker_id}</td><td class="status-processing">${j.filename}</td>
+                    let statusClass = "status-" + j.status;
+                    let displayStatus = j.status.charAt(0).toUpperCase() + j.status.slice(1);
+                    activeHtml += `<tr><td>${j.worker_id}</td><td class="${statusClass}">${j.filename}<br><small>${displayStatus}</small></td>
                     <td>
                         <div class="progress-wrapper">
                             <div class="progress-track"><div class="progress-fill" style="width:${j.progress}%"></div></div>

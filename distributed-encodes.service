@@ -1,0 +1,20 @@
+[Unit]
+Description=Distributed Encodes Manager
+After=network.target
+
+[Service]
+# START CONFIGURATION
+# Adjust WorkingDirectory to match where you cloned the repo
+# Example: /home/youruser/distributed-encodes
+WorkingDirectory=%h/distributed-encodes
+
+# Adjust path to python if using venv (e.g., %h/distributed-encodes/venv/bin/python)
+ExecStart=/usr/bin/python3 manager.py
+# END CONFIGURATION
+
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
