@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fractum Distributed Encodes Dashboard </title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .full-width { grid-column: span 2; }
+        .card { background: #1e1e1e; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        h2 { margin-top: 0; color: #4CAF50; border-bottom: 1px solid #333; padding-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #333; }
+        th { color: #888; }
+        .status-processing { color: #FFC107; font-weight: bold; }
+        .status-completed { color: #4CAF50; }
+        .status-failed { color: #F44336; }
+        .status-uploading { color: #2196F3; }
+        
+        .progress-wrapper { display: flex; align-items: center; }
+        .progress-track { background-color: #333; width: 100px; height: 10px; border-radius: 5px; margin-right: 10px; overflow: hidden; }
+        .progress-fill { background-color: #4CAF50; height: 100%; transition: width 0.5s ease; }
+    </style>
+    <script>
+        function updateDashboard() {
+            fetch('/api/stats').then(r => r.json()).then(data => {
+                let scoreHtml = "";
+                data.scoreboard.forEach(u => {
+                    scoreHtml += `<tr><td>${u.worker_id}</td><td>${u.total_minutes}m</td><td>${u.files_count}</td></tr>`;
+                });
+                document.getElementById('scoreboard-body').innerHTML = scoreHtml || "<tr><td colspan='3'>No data</td></tr>";
+
+                let activeHtml = "";
+                data.active.forEach(j => {
+                    activeHtml += `<tr><td>${j.worker_id}</td><td class="status-processing">${j.filename}</td>
+                    <td>
+                        <div class="progress-wrapper">
+                            <div class="progress-track"><div class="progress-fill" style="width:${j.progress}%"></div></div>
+                            ${j.progress}%
+                        </div>
+                    </td>
+                    <td>${j.duration}m</td></tr>`;
+                });
+                document.getElementById('active-body').innerHTML = activeHtml || "<tr><td colspan='4'>No active workers</td></tr>";
+                
+                let histHtml = "";
+                data.history.forEach(j => {
+                    histHtml += `<tr><td>${j.id}</td><td class="status-${j.status}">${j.status}</td><td>${j.worker_id||'-'}</td></tr>`;
+                });
+                document.getElementById('history-body').innerHTML = histHtml;
+            });
+        }
+        setInterval(updateDashboard, 2000); window.onload = updateDashboard;
+    </script>
+</head>
+<body>
+    <div class="container">
+        <div class="card"><h2>Active Workers</h2>
+            <table><thead><tr><th>Worker</th><th>File</th><th>Progress</th><th>Length</th></tr></thead><tbody id="active-body"></tbody></table>
+        </div>
+        <div class="card"><h2>Scoreboard</h2>
+            <table><thead><tr><th>User</th><th>Minutes</th><th>Files</th></tr></thead><tbody id="scoreboard-body"></tbody></table>
+        </div>
+        <div class="card full-width"><h2>Recent Activity</h2>
+            <table><thead><tr><th>File</th><th>Status</th><th>Worker</th></tr></thead><tbody id="history-body"></tbody></table>
+        </div>
+    </div>
+</body>
+</html>
