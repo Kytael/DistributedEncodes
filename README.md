@@ -1,41 +1,56 @@
-# FractumSeraphs Distributed Encodes
+# FractumSeraph's Distributed Video Encoder
 
-This tool is a distributed system that lets you crowd-source video transcoding. It splits the workload across multiple "Worker" computers (friends/volunteers/extra PCs), coordinates them via a central Manager, and uses a FTP server for file transfer. It's split into four main parts.
-manager.py: A Python/Flask server that tracks jobs, users, and the leaderboard.
-docker-compose.yml: A Dockerized FTP server.
-worker.py: A standalone client (Windows/Linux) that downloads, transcodes, and uploads videos.
-populate.py: Scans your local library to create jobs for the manager to hand out to workers.
+A distributed video encoding system that uses a central manager to coordinate tasks and multiple remote workers to process video files. 
 
-You will need a PC to use as the server, so it will need to have some ports forwarded. By default, ports 21, 5000, and 30000-30100 are used.
-You'll also need python3 and pip.
-In the docker-compose file you'll need to change the address to that of your server.
-By deault the username and password of your ftp server are both 'transcode'.
+The system uses HTTP for all data transfer, meaning Workers do not need to mount network drives, install programs, or anything special. They simply need an internet connectiontand the rest of the setup is automatic.
 
-For the manager.py file, you'll need to set an API secret key. This is essentially a password and you'll need to put the same key in the other files as well.
-To run the manager you'll need to install flask and flask-cors with pip.
-'pip install flask flask-cors'
+## System Architecture
 
-In the populate.py file, you need to change your server address, the API from before, and the location of your media.
+1.  **Manager:** Hosts the source files, the database, and a web dashboard.
+2.  **Workers:** Download a raw video, encode it locally (using FFmpeg), and upload the result back to the Manager.
 
-For the worker.py you'll need to set your server address(manager.py), the API key again, and your FTP server details.
-For workers, rather than requiring people to install python, you can instead use pyinstaller to create a .exe.
-'pip install pyinstaller'
-'pyinstaller --onefile --name WorkerWithoutPython worker.py'
-Now you can take the WorkerWithoutPython.exe file (rename it if you'd like) and place it in a folder with HandbrakeCLI, Your preset.json, and ffprobe.exe Sip up the folder and send it to your workers.
+## Prerequisites
 
-For the stats dashboard, edit the API_URL to point to your manager.py server.
+* **Manager:** Python 3.8+, Flask, SQLite
+* **Worker:** Linux/macOS/WSL with Python 3. FFmpeg with av1 (svt) support is also required, but will be downloaded automatically if required.
 
-For your media files, ensure they match this structure:
-```
-/Media_Root/
-    |
-    |--- source/          <-- Original videos
-    |      |--- Series A/
-    |      |--- Movie.mkv
-    |
-    |--- completed/       <-- Uploaded encoded versions get put here
-```
-I have an active instance running at https://vsv.fractumseraph.net/stats.html
-Feel free to help out with my encodes if you have any spare processing power! I post all of the results on the main site.
+## Server Setup (The Manager)
 
-<img width="1610" height="887" alt="FractumDistributedEncodes" src="https://github.com/user-attachments/assets/b256af88-1009-49a4-9a57-a739adb50270" />
+1.  **Clone the repository:**
+    ```bash
+    git clone [https://github.com/FractumSeraph/DistributedEncodes.git](https://github.com/FractumSeraph/DistributedEncodes.git)
+    cd DistributedEncodes
+    ```
+
+2.  **Install Dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+3.  **Prepare Folders:**
+    Create a folder named `source_media` in the root directory.
+    ```bash
+    mkdir source_media
+    ```
+    *Place your raw video files here.(e.g., `source_media/Series Name/Season 1/Episode 1.mkv`).*
+
+4.  **Configuration:**
+    Open `manager.py` and edit the `SERVER_URL_DISPLAY` to your servers ip/domain.
+    ```python
+    SERVER_URL_DISPLAY = "[https://encode.fractumseraph.net/](https://encode.fractumseraph.net/)"
+    ```
+
+5.  **Run the Server:**
+    ```bash
+    python manager.py
+    ```
+    The server listens on Port 80 bby default, but I recommend placing this behing a reverse proxy with https support instead. That will be required when I get the web worker finished..
+
+## Worker Setup
+
+Workers can be set up with a single command. The Manager hosts a dynamic installer script.
+
+Windows users can install python and run the worker.py file. I Will occasionally build .exe releases as well.
+Run this on any Linux machine for a one liner download and run. Replace username and workername with your preferences:
+
+```curl -s "https://encode.fractumseraph.net/install?username=YourName&workername=GamingPC" | sudo bash```
