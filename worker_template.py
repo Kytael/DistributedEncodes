@@ -52,35 +52,23 @@ def check_ffmpeg():
         print("    Please install a compatible FFmpeg manually.")
         exit(1)
 
-def run_worker(args):
-    check_ffmpeg()
-    # Fallback to defaults if args are missing/None
-    manager_url = (args.manager or DEFAULT_MANAGER_URL).rstrip('/')
-    username = args.username or DEFAULT_USERNAME
-    workername = args.workername or DEFAULT_WORKERNAME
+def worker_task(worker_id, manager_url, temp_dir):
+    """Single worker thread loop."""
+    print(f"[{worker_id}] Started.")
+    os.makedirs(temp_dir, exist_ok=True)
     
-    full_id = f"{username}-{workername}"
-    print(f"[*] Worker: {full_id} | Manager: {manager_url}")
-    
-    TEMP_DIR = f"./temp_encode_{workername}"
-    if os.path.exists(TEMP_DIR): shutil.rmtree(TEMP_DIR)
-    os.makedirs(TEMP_DIR, exist_ok=True)
-
-    completed_count = 0
     while True:
-        if args.jobs > 0 and completed_count >= args.jobs: 
-            print("[*] Job limit reached."); break
         try:
             r = requests.get(f"{manager_url}/get_job")
             data = r.json() if r.status_code == 200 else None
             
             if data and data.get("status") == "ok":
                 job = data["job"]; job_id = job['id']; dl_url = job['download_url']
-                local_src = os.path.join(TEMP_DIR, "source.tmp"); local_dst = os.path.join(TEMP_DIR, "encoded.mkv")
+                local_src = os.path.join(temp_dir, "source.tmp"); local_dst = os.path.join(temp_dir, "encoded.mkv")
                 
                 # --- DOWNLOADING ---
-                print(f"[*] Downloading: {job_id}")
-                requests.post(f"{manager_url}/report_status", json={"worker_id":full_id, "job_id":job_id, "status":"downloading", "progress":0})
+                print(f"[{worker_id}] Downloading: {job_id}")
+                requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"downloading", "progress":0})
                 
                 with requests.get(dl_url, stream=True) as r:
                     r.raise_for_status()
@@ -94,7 +82,7 @@ def run_worker(args):
                             downloaded += len(chunk)
                             if total_size > 0 and time.time() - last_rep > 5:
                                 pct = int((downloaded/total_size)*100)
-                                requests.post(f"{manager_url}/report_status", json={"worker_id":full_id, "job_id":job_id, "status":"downloading", "progress":pct})
+                                requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"downloading", "progress":pct})
                                 last_rep = time.time()
 
                 total_sec = 0; total_min = 0
@@ -106,15 +94,13 @@ def run_worker(args):
                 except: pass
 
                 # --- ENCODING ---
-                print(f"[*] Encoding ({total_min}m)...")
-                requests.post(f"{manager_url}/report_status", json={"worker_id":full_id, "job_id":job_id, "status":"processing", "progress":0, "duration":total_min})
+                print(f"[{worker_id}] Encoding ({total_min}m): {job_id}")
+                requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"processing", "progress":0, "duration":total_min})
                 
                 # Identify text-based subtitle streams to keep
                 allowed_subs = []
                 try:
                     for line in res.stderr.split('\n'):
-                        # Look for subtitle streams that are text-based (subrip, ass, webvtt, mov_text)
-                        # Regex to capture stream index. Example: "Stream #0:2(eng): Subtitle: subrip"
                         m_sub = re.search(r"Stream #0:(\d+).*Subtitle:\s*(subrip|ass|webvtt|mov_text|text)", line, re.IGNORECASE)
                         if m_sub:
                             allowed_subs.append(m_sub.group(1))
@@ -127,7 +113,6 @@ def run_worker(args):
                     '-map', '0:a:0', # Map first audio stream
                 ]
                 
-                # Append mapped text subtitles
                 for idx in allowed_subs:
                     cmd.extend(['-map', f'0:{idx}'])
 
@@ -150,14 +135,14 @@ def run_worker(args):
                             try:
                                 curr = get_seconds(line.split('=')[1].strip())
                                 pct = int((curr/total_sec)*100)
-                                requests.post(f"{manager_url}/report_status", json={"worker_id":full_id, "job_id":job_id, "status":"processing", "progress":pct})
+                                requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"processing", "progress":pct})
                                 last_rep = time.time()
                             except: pass
 
                 if proc.returncode == 0:
                     # --- UPLOADING ---
-                    print(f"[*] Uploading...")
-                    requests.post(f"{manager_url}/report_status", json={"worker_id":full_id, "job_id":job_id, "status":"uploading", "progress":0})
+                    print(f"[{worker_id}] Uploading: {job_id}")
+                    requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"uploading", "progress":0})
                     
                     class ProgressFileReader:
                         def __init__(self, filename, callback):
@@ -177,21 +162,48 @@ def run_worker(args):
                         def __getattr__(self, attr): return getattr(self._f, attr)
 
                     def upload_progress(pct):
-                        try: requests.post(f"{manager_url}/report_status", json={"worker_id":full_id, "job_id":job_id, "status":"uploading", "progress":pct})
+                        try: requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"uploading", "progress":pct})
                         except: pass
 
                     with ProgressFileReader(local_dst, upload_progress) as f:
-                        requests.post(f"{manager_url}/upload_result", files={'file': (job_id, f)}, data={'job_id': job_id, 'worker_id': full_id})
+                        requests.post(f"{manager_url}/upload_result", files={'file': (job_id, f)}, data={'job_id': job_id, 'worker_id': worker_id})
                     
-                    print(f"[+] Done: {job_id}")
-                    completed_count += 1
+                    print(f"[{worker_id}] Done: {job_id}")
                 else:
-                    print("[!] Failed"); requests.post(f"{manager_url}/report_status", json={"worker_id":full_id, "job_id":job_id, "status":"failed"})
+                    print(f"[{worker_id}] Failed: {job_id}"); requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"failed"})
 
                 if os.path.exists(local_src): os.remove(local_src)
                 if os.path.exists(local_dst): os.remove(local_dst)
             else: time.sleep(10)
-        except Exception as e: print(f"[!] Error: {e}"); time.sleep(10)
+        except Exception as e: print(f"[{worker_id}] Error: {e}"); time.sleep(10)
+
+def run_worker(args):
+    check_ffmpeg()
+    # Fallback to defaults if args are missing/None
+    manager_url = (args.manager or DEFAULT_MANAGER_URL).rstrip('/')
+    username = args.username or DEFAULT_USERNAME
+    base_workername = args.workername or DEFAULT_WORKERNAME
+    
+    # Concurrency limit
+    num_jobs = args.jobs if args.jobs > 0 else 1
+    if num_jobs > 32: num_jobs = 32
+    
+    print(f"[*] Starting {num_jobs} worker threads.")
+    print(f"[*] Base ID: {username}-{base_workername} | Manager: {manager_url}")
+    
+    threads = []
+    for i in range(num_jobs):
+        worker_id = f"{username}-{base_workername}-{i+1}"
+        temp_dir = f"./temp_encode_{base_workername}_{i+1}"
+        t = threading.Thread(target=worker_task, args=(worker_id, manager_url, temp_dir))
+        t.daemon = True
+        t.start()
+        threads.append(t)
+        
+    try:
+        while True: time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[*] Stopping workers...")
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()

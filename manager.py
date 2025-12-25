@@ -55,7 +55,8 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY, filename TEXT, status TEXT, worker_id TEXT,
-                progress INTEGER DEFAULT 0, duration INTEGER DEFAULT 0, last_updated TIMESTAMP
+                progress INTEGER DEFAULT 0, duration INTEGER DEFAULT 0, last_updated TIMESTAMP,
+                started_at TIMESTAMP
             )
         ''')
         conn.commit()
@@ -159,7 +160,7 @@ def get_job():
         # and to persist state across server restarts if queue was persistent (it isn't, but DB is).
         with db_lock:
             conn = sqlite3.connect(DB_FILE)
-            conn.execute("UPDATE jobs SET status='processing', last_updated=? WHERE id=?", (datetime.now(), job['id']))
+            conn.execute("UPDATE jobs SET status='processing', last_updated=?, started_at=? WHERE id=?", (datetime.now(), datetime.now(), job['id']))
             conn.commit(); conn.close()
         return jsonify({"status": "ok", "job": job})
     except queue.Empty: return jsonify({"status": "empty"})
@@ -252,6 +253,70 @@ def admin_action():
         conn.commit(); conn.close()
     return jsonify({"status": "ok"})
 
+def maintenance_loop():
+    """Background thread to reset stuck jobs."""
+    while True:
+        try:
+            with db_lock:
+                conn = sqlite3.connect(DB_FILE)
+                cursor = conn.cursor()
+                now = datetime.now()
+                
+                # Rule 1: Reset if assigned > 24 hours ago (Stuck job)
+                # We need to handle cases where started_at might be NULL (legacy jobs)
+                cursor.execute("SELECT id, filename, started_at FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
+                for row in cursor.fetchall():
+                    jid, fname, started = row
+                    reset = False
+                    
+                    if started:
+                        try:
+                            s_time = datetime.strptime(started, "%Y-%m-%d %H:%M:%S.%f")
+                            if (now - s_time).total_seconds() > 86400: # 24 hours
+                                reset = True
+                                print(f"[!] Job {jid} timed out (24h limit). Resetting.")
+                        except: pass # Parsing error or different format
+                    
+                    if reset:
+                        cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
+                        # Re-queue in memory
+                        job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{jid}"})
+
+                # Rule 2: Reset if last_updated > 2 hours ago (Disconnected worker)
+                cursor.execute("SELECT id, filename, last_updated FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
+                for row in cursor.fetchall():
+                    jid, fname, last_up = row
+                    reset = False
+                    
+                    if last_up:
+                        try:
+                            l_time = datetime.strptime(last_up, "%Y-%m-%d %H:%M:%S.%f")
+                            if (now - l_time).total_seconds() > 7200: # 2 hours
+                                reset = True
+                                print(f"[!] Job {jid} zombie worker (2h silence). Resetting.")
+                        except: pass
+                    
+                    if reset:
+                        # Only reset if not already reset by Rule 1 (though redundant update is fine)
+                        cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
+                        # Re-queue if not already in queue (this is tricky with in-memory queue, but duplicate put is safer than lost job)
+                        # To avoid duplicate in queue, we could check queue, but that's O(N).
+                        # Simple approach: Just put it back. Workers handle duplicates if they grab same ID? 
+                        # Actually manager gives jobs. If it's in queue twice, second get will be invalid status in DB?
+                        # scan_and_queue checks DB status 'queued'.
+                        # If we set DB status to 'queued', we must add to queue.
+                        job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{jid}"})
+                
+                conn.commit()
+                conn.close()
+        except Exception as e:
+            print(f"[!] Maintenance error: {e}")
+        
+        time.sleep(600) # Run every 10 minutes
+
 if __name__ == '__main__':
     print(f"[*] Manager running at {SERVER_URL_DISPLAY}")
-    init_db(); scan_and_queue(); app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
+    init_db()
+    scan_and_queue()
+    threading.Thread(target=maintenance_loop, daemon=True).start()
+    app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
