@@ -20,6 +20,7 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
+WORKER_VERSION = "1.0.1"
 
 # ==============================================================================
 # ENCODING CONFIGURATION - DO NOT MODIFY WITHOUT EXPLICIT USER INSTRUCTION
@@ -51,6 +52,42 @@ ENCODING_CONFIG = {
 # ==============================================================================
 # HELPERS
 # ==============================================================================
+
+def check_for_updates(manager_url):
+    """Checks the manager for a newer version of this script and updates if found."""
+    print(f"[*] Checking for updates (Current: {WORKER_VERSION})...")
+    try:
+        url = f"{manager_url}/dl/worker"
+        r = requests.get(url, timeout=10)
+        
+        if r.status_code == 200:
+            new_content = r.text
+            # Simple regex to find version in remote file
+            match = re.search(r'WORKER_VERSION\s*=\s*"([^"]+)"', new_content)
+            
+            if match:
+                remote_version = match.group(1)
+                if remote_version != WORKER_VERSION:
+                    print(f"[!] Update found: {WORKER_VERSION} -> {remote_version}")
+                    print("[*] Downloading and applying update...")
+                    
+                    # Overwrite current script
+                    script_path = os.path.abspath(sys.argv[0])
+                    with open(script_path, 'w', encoding='utf-8') as f:
+                        f.write(new_content)
+                        
+                    print("[*] Restarting worker...")
+                    # Restart the process
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                else:
+                    print("[*] Worker is up to date.")
+            else:
+                print("[!] Warning: Could not determine remote version. Skipping update.")
+        else:
+            print(f"[!] Update check failed: Server returned {r.status_code}")
+            
+    except Exception as e:
+        print(f"[!] Update check failed: {e}")
 
 def log(worker_id, message, level="INFO"):
     """Thread-safe logging with timestamps."""
@@ -471,6 +508,9 @@ def run_worker(args):
     # Verify URL before starting
     if not verify_connection(manager_url):
         sys.exit(1)
+    
+    # Check for updates
+    check_for_updates(manager_url)
     
     num_jobs = args.jobs if args.jobs > 0 else 1
     if num_jobs > 32: num_jobs = 32
