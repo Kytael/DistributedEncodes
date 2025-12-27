@@ -13,17 +13,22 @@ from flask import Flask, request, jsonify, render_template, send_from_directory,
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-SERVER_HOST = '0.0.0.0'
-SERVER_PORT = 5000
-SERVER_URL_DISPLAY = "https://encode.fractumseraph.net/"
-ADMIN_USER = "admin"
-ADMIN_PASS = "changeme"  # CHANGE THIS IN PRODUCTION
-
-SOURCE_DIRECTORY = "./source_media"
-COMPLETED_DIRECTORY = "./completed_media"
-WORKER_TEMPLATE_FILE = "worker_template.py"
-DB_FILE = "encoding_jobs.db"
-VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov')
+try:
+    from config import (
+        SERVER_HOST,
+        SERVER_PORT,
+        SERVER_URL_DISPLAY,
+        ADMIN_USER,
+        ADMIN_PASS,
+        SOURCE_DIRECTORY,
+        COMPLETED_DIRECTORY,
+        WORKER_TEMPLATE_FILE,
+        DB_FILE,
+        VIDEO_EXTENSIONS
+    )
+except ImportError:
+    print("Error: 'config.py' not found. Please copy 'config.py.example' to 'config.py' and adjust settings.")
+    exit(1)
 
 app = Flask(__name__)
 job_queue = queue.Queue()

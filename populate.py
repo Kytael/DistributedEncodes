@@ -1,9 +1,11 @@
 import os, sqlite3
 from datetime import datetime
 
-SOURCE_DIRECTORY = "./source_media"
-DB_FILE = "encoding_jobs.db"
-VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov')
+try:
+    from config import SOURCE_DIRECTORY, DB_FILE, VIDEO_EXTENSIONS
+except ImportError:
+    print("Error: 'config.py' not found. Please copy 'config.py.example' to 'config.py'.")
+    exit(1)
 
 def populate_db():
     print(f"[*] Scanning {SOURCE_DIRECTORY}...")
