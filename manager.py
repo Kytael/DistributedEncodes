@@ -43,6 +43,7 @@ except ImportError:
 
 app = Flask(__name__)
 job_queue = queue.Queue()
+queued_job_ids = set() # Track IDs in queue to prevent duplicates
 db_lock = threading.Lock()
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024 
 
@@ -130,7 +131,9 @@ def scan_and_queue():
     print("[*] Loading queue from database...")
     cursor.execute("SELECT id, filename FROM jobs WHERE status = 'queued'")
     for row in cursor.fetchall():
-        job_queue.put({"id": row[0], "filename": row[1], "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(row[0], safe='/')}"})
+        if row[0] not in queued_job_ids:
+            job_queue.put({"id": row[0], "filename": row[1], "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(row[0], safe='/')}"})
+            queued_job_ids.add(row[0])
     conn.close()
     print(f"[*] Queue ready. {job_queue.qsize()} jobs waiting.")
 
@@ -172,10 +175,12 @@ def download_source(filename): return send_from_directory(SOURCE_DIRECTORY, file
 @app.route('/get_job', methods=['GET'])
 def get_job():
     try:
-        job = job_queue.get_nowait()
-        # Mark as processing immediately so no one else gets it (if logic changes) 
-        # and to persist state across server restarts if queue was persistent (it isn't, but DB is).
         with db_lock:
+            job = job_queue.get_nowait()
+            queued_job_ids.discard(job['id'])
+            
+            # Mark as processing immediately so no one else gets it (if logic changes) 
+            # and to persist state across server restarts if queue was persistent (it isn't, but DB is).
             conn = sqlite3.connect(DB_FILE)
             conn.execute("UPDATE jobs SET status='processing', last_updated=?, started_at=? WHERE id=?", (datetime.now(), datetime.now(), job['id']))
             conn.commit(); conn.close()
@@ -266,7 +271,9 @@ def admin_action():
             c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=? WHERE id=?", (datetime.now(), job_id))
             c.execute("SELECT filename FROM jobs WHERE id=?", (job_id,))
             row = c.fetchone()
-            if row: job_queue.put({"id": job_id, "filename": row[0], "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(job_id, safe='/')}"})
+            if row and job_id not in queued_job_ids:
+                 job_queue.put({"id": job_id, "filename": row[0], "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(job_id, safe='/')}"})
+                 queued_job_ids.add(job_id)
         conn.commit(); conn.close()
     return jsonify({"status": "ok"})
 
@@ -297,7 +304,9 @@ def maintenance_loop():
                     if reset:
                         cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
                         # Re-queue in memory
-                        job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(jid, safe='/')}"})
+                        if jid not in queued_job_ids:
+                             job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(jid, safe='/')}"})
+                             queued_job_ids.add(jid)
 
                 # Rule 2: Reset if last_updated > 2 hours ago (Disconnected worker)
                 cursor.execute("SELECT id, filename, last_updated FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
