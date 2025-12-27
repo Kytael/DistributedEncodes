@@ -13,6 +13,16 @@ from flask import Flask, request, jsonify, render_template, send_from_directory,
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
+import shutil
+
+if not os.path.exists('config.py'):
+    if os.path.exists('config.py.example'):
+        shutil.copy('config.py.example', 'config.py')
+        print("[*] Created 'config.py' from default example.")
+    else:
+        print("[!] Error: 'config.py' not found and 'config.py.example' missing.")
+        exit(1)
+
 try:
     from config import (
         SERVER_HOST,
@@ -27,7 +37,7 @@ try:
         VIDEO_EXTENSIONS
     )
 except ImportError:
-    print("Error: 'config.py' not found. Please copy 'config.py.example' to 'config.py' and adjust settings.")
+    print("Error: Could not import settings from 'config.py'.")
     exit(1)
 
 app = Flask(__name__)

@@ -1,10 +1,20 @@
 import os, sqlite3
 from datetime import datetime
 
+import shutil
+
+if not os.path.exists('config.py'):
+    if os.path.exists('config.py.example'):
+        shutil.copy('config.py.example', 'config.py')
+        print("[*] Created 'config.py' from default example.")
+    else:
+        print("[!] Error: 'config.py' not found and 'config.py.example' missing.")
+        exit(1)
+
 try:
     from config import SOURCE_DIRECTORY, DB_FILE, VIDEO_EXTENSIONS
 except ImportError:
-    print("Error: 'config.py' not found. Please copy 'config.py.example' to 'config.py'.")
+    print("Error: Could not import settings from 'config.py'.")
     exit(1)
 
 def populate_db():
