@@ -15,7 +15,7 @@ The system uses HTTP for all data transfer, meaning Workers do not need to mount
   * OS: Ubuntu 22.04/24.04 LTS (Recommended)
   * Software: Python 3.8+, pip, git, ffmpeg (for verification only)
 * **Worker:** 
-  * OS: Linux/macOS/Windows (WSL recommended)
+  * OS: Linux/macOS/Windows
   * Software: Python 3. FFmpeg with SVT-AV1 support (auto-installed on Linux).
 
 ## Server Deployment (The Manager)
