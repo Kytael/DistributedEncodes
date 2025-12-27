@@ -195,6 +195,10 @@ def upload_result():
         save_path = os.path.abspath(os.path.join(COMPLETED_DIRECTORY, job_id))
         completed_abs = os.path.abspath(COMPLETED_DIRECTORY)
         if not save_path.startswith(completed_abs):
+             with db_lock:
+                 conn = sqlite3.connect(DB_FILE)
+                 conn.execute("UPDATE jobs SET status='failed', last_updated=? WHERE id=?", (datetime.now(), job_id))
+                 conn.commit(); conn.close()
              return jsonify({"status": "error", "message": "Invalid path"}), 403
 
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -246,8 +250,18 @@ def api_stats():
         act = [dict(r) for r in c.fetchall()]
         c.execute("SELECT id, status, worker_id FROM jobs ORDER BY last_updated DESC LIMIT 20")
         hist = [dict(r) for r in c.fetchall()]
+        # New Metrics
+        c.execute("SELECT COUNT(*) FROM jobs")
+        total_count = c.fetchone()[0]
         conn.close()
-    return jsonify({"scoreboard": sb, "active": act, "history": hist})
+    
+    return jsonify({
+        "scoreboard": sb, 
+        "active": act, 
+        "history": hist,
+        "queue_depth": job_queue.qsize(),
+        "total_jobs": total_count
+    })
 
 # --- ADMIN API ---
 @app.route('/api/all_jobs')

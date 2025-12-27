@@ -20,7 +20,7 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.0.1"
+WORKER_VERSION = "1.0.2"
 
 # ==============================================================================
 # ENCODING CONFIGURATION - DO NOT MODIFY WITHOUT EXPLICIT USER INSTRUCTION
@@ -444,6 +444,10 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                             self._read = 0
                             self._callback = callback
                             self._last_time = 0
+                        def __enter__(self):
+                            return self
+                        def __exit__(self, exc_type, exc_val, exc_tb):
+                            self._f.close()
                         def read(self, size=-1):
                             data = self._f.read(size)
                             self._read += len(data)
