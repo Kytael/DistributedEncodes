@@ -1,18 +1,71 @@
-import argparse, time, requests, subprocess, os, re, shutil, threading
+import argparse
+import time
+import requests
+import subprocess
+import os
+import re
+import shutil
+import threading
+import sys
+import traceback
+import platform
+from datetime import datetime
 
 # ==============================================================================
-# DEFAULT CONFIGURATION
+# CONFIGURATION
 # ==============================================================================
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
+
+# ==============================================================================
+# HELPERS
 # ==============================================================================
 
+def log(worker_id, message, level="INFO"):
+    """Thread-safe logging with timestamps."""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    # Use simple print which is generally thread-safe for single lines
+    print(f"[{timestamp}] [{worker_id}] [{level}] {message}")
+
+def print_progress(worker_id, current, total, prefix='', suffix=''):
+    """
+    Draws a progress bar. 
+    NOTE: Only use this in single-thread mode to avoid console scrambling.
+    """
+    if total <= 0: return
+    
+    # Calculate percentages
+    percent = 100 * (current / float(total))
+    if percent > 100: percent = 100
+    
+    # Bar configuration
+    length = 40
+    filled_length = int(length * current // total)
+    bar = '█' * filled_length + '-' * (length - filled_length)
+    
+    # Overwrite line
+    sys.stdout.write(f'\r[{datetime.now().strftime("%H:%M:%S")}] [{worker_id}] {prefix} |{bar}| {percent:.1f}% {suffix}')
+    sys.stdout.flush()
+    
+    if current >= total:
+        sys.stdout.write('\n')
+
 def get_seconds(t):
-    try: h,m,s = t.split(':'); return int(h)*3600 + int(m)*60 + float(s)
-    except: return 0
+    """Converts HH:MM:SS.ms to total seconds."""
+    try:
+        parts = t.split(':')
+        h = int(parts[0])
+        m = int(parts[1])
+        s = float(parts[2])
+        return h*3600 + m*60 + s
+    except:
+        return 0
 
 def check_ffmpeg():
+    """Verifies FFmpeg installation and SVT-AV1 support."""
+    print("[*] Checking FFmpeg installation...")
+    
     def has_svtav1():
         try:
             res = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -21,11 +74,12 @@ def check_ffmpeg():
             return False
 
     if shutil.which("ffmpeg") and has_svtav1():
+        print("[*] FFmpeg with SVT-AV1 found. Good to go.")
         return
 
-    print("[!] FFmpeg with SVT-AV1 support not found. Attempting to install...")
+    print("[!] FFmpeg with SVT-AV1 support not found or missing.")
+    print("[!] Attempting automatic installation...")
     
-    # Try to install if missing or insufficient
     try:
         if shutil.which("apt-get"):
             subprocess.run(["sudo", "apt-get", "update", "-qq"], check=True)
@@ -37,113 +91,179 @@ def check_ffmpeg():
         elif shutil.which("choco"):
              subprocess.run(["choco", "install", "ffmpeg", "-y"], check=True)
         else:
-            if not shutil.which("ffmpeg"): # Only raise if we have NO ffmpeg
+            if not shutil.which("ffmpeg"): 
                 raise EnvironmentError("No supported package manager found.")
         
-        if not shutil.which("ffmpeg"):
-             raise EnvironmentError("Installation appeared to succeed but ffmpeg is still missing.")
-             
         if not has_svtav1():
-             raise EnvironmentError("Installed FFmpeg does not support libsvtav1 (SVT-AV1). Please install a build with SVT-AV1 support manually.")
+             raise EnvironmentError("Installed FFmpeg does not support libsvtav1 (SVT-AV1). Please install a custom build.")
              
-        print("[*] FFmpeg with SVT-AV1 installed/verified successfully.")
+        print("[*] Installation successful.")
     except Exception as e:
-        print(f"[!] Critical Error: {e}")
-        print("    Please install a compatible FFmpeg manually.")
-        exit(1)
+        print(f"[!] CRITICAL ERROR: {e}")
+        print("    Please install FFmpeg with libsvtav1 manually.")
+        sys.exit(1)
 
-def worker_task(worker_id, manager_url, temp_dir):
-    """Single worker thread loop."""
-    print(f"[{worker_id}] Started.")
+def verify_connection(manager_url):
+    """Checks if the manager is reachable before starting."""
+    print(f"[*] Testing connection to Manager: {manager_url}")
+    try:
+        r = requests.get(manager_url, timeout=10)
+        if r.status_code < 400:
+            print("[*] Connection successful.")
+            return True
+        else:
+            print(f"[!] Server replied with error: {r.status_code}")
+    except requests.exceptions.ConnectionError:
+        print(f"[!] CRITICAL: Could not connect to {manager_url}")
+        print("    1. Check if the URL is correct (use --manager http://IP:PORT).")
+        print("    2. Check if the manager server is running.")
+        print("    3. Check your firewall settings.")
+    except Exception as e:
+        print(f"[!] Error connecting: {e}")
+    
+    return False
+
+# ==============================================================================
+# WORKER LOGIC
+# ==============================================================================
+
+def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
+    """
+    The main lifecycle of a worker thread.
+    single_mode: If True, enables visual progress bars.
+    """
+    log(worker_id, "Thread started. Polling for jobs...")
     os.makedirs(temp_dir, exist_ok=True)
     
     while True:
         try:
-            r = requests.get(f"{manager_url}/get_job")
+            # 1. Request Job
+            try:
+                r = requests.get(f"{manager_url}/get_job", timeout=10)
+            except requests.exceptions.RequestException as e:
+                log(worker_id, f"Connection lost: {e}. Retrying in 30s...", "WARN")
+                time.sleep(30)
+                continue
+
             data = r.json() if r.status_code == 200 else None
             
             if data and data.get("status") == "ok":
-                job = data["job"]; job_id = job['id']; dl_url = job['download_url']
-                local_src = os.path.join(temp_dir, "source.tmp"); local_dst = os.path.join(temp_dir, "encoded.mkv")
+                job = data["job"]
+                job_id = job['id']
+                dl_url = job['download_url']
                 
-                # --- DOWNLOADING ---
-                print(f"[{worker_id}] Downloading: {job_id}")
+                log(worker_id, f"Received Job: {job_id} ({job['filename']})")
+                
+                local_src = os.path.join(temp_dir, "source.tmp")
+                local_dst = os.path.join(temp_dir, "encoded.mkv")
+                
+                # --- STEP 1: DOWNLOADING ---
+                if not single_mode: log(worker_id, "Status: Downloading...")
                 requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"downloading", "progress":0})
                 
-                with requests.get(dl_url, stream=True) as r:
-                    r.raise_for_status()
-                    total_size = int(r.headers.get('content-length', 0))
-                    downloaded = 0
-                    last_rep = 0
-                    
-                    with open(local_src, 'wb') as f:
-                        for chunk in r.iter_content(chunk_size=8192): 
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if total_size > 0 and time.time() - last_rep > 5:
-                                pct = int((downloaded/total_size)*100)
-                                requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"downloading", "progress":pct})
-                                last_rep = time.time()
-
-                total_sec = 0; total_min = 0
                 try:
-                    # Use list-based command
+                    with requests.get(dl_url, stream=True, timeout=30) as r:
+                        r.raise_for_status()
+                        total_size = int(r.headers.get('content-length', 0))
+                        downloaded = 0
+                        last_rep = 0
+                        
+                        with open(local_src, 'wb') as f:
+                            for chunk in r.iter_content(chunk_size=8192): 
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                
+                                # Report to server every 5s
+                                if time.time() - last_rep > 5:
+                                    pct = int((downloaded/total_size)*100) if total_size > 0 else 0
+                                    requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"downloading", "progress":pct})
+                                    last_rep = time.time()
+                                    if not single_mode: log(worker_id, f"Downloading: {pct}%")
+                                
+                                # Visual Bar
+                                if single_mode: print_progress(worker_id, downloaded, total_size, prefix='Downloading')
+
+                    if single_mode: print_progress(worker_id, total_size, total_size, prefix='Downloading', suffix='Done')
+                except Exception as e:
+                    log(worker_id, f"Download failed: {e}", "ERROR")
+                    requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"failed"})
+                    time.sleep(5)
+                    continue
+
+                # --- STEP 2: ANALYZE ---
+                total_sec = 0
+                total_min = 0
+                try:
                     res = subprocess.run(['ffmpeg', '-i', local_src], stderr=subprocess.PIPE, text=True)
                     m = re.search(r"Duration: (\d{2}:\d{2}:\d{2}\.\d{2})", res.stderr)
-                    if m: total_sec = get_seconds(m.group(1)); total_min = int(total_sec/60)
+                    if m: 
+                        total_sec = get_seconds(m.group(1))
+                        total_min = int(total_sec/60)
                 except: pass
 
-                # --- ENCODING ---
-                print(f"[{worker_id}] Encoding ({total_min}m): {job_id}")
+                # --- STEP 3: ENCODING ---
+                log(worker_id, f"Starting Encode. Length: {total_min} mins.")
                 requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"processing", "progress":0, "duration":total_min})
                 
-                # Identify text-based subtitle streams to keep
+                # Identify subtitle streams
                 allowed_subs = []
                 try:
                     for line in res.stderr.split('\n'):
                         m_sub = re.search(r"Stream #0:(\d+).*Subtitle:\s*(subrip|ass|webvtt|mov_text|text)", line, re.IGNORECASE)
-                        if m_sub:
-                            allowed_subs.append(m_sub.group(1))
+                        if m_sub: allowed_subs.append(m_sub.group(1))
                 except: pass
 
-                # Build command
+                # Build FFmpeg Command
                 cmd = [
                     'ffmpeg', '-y', '-i', local_src,
-                    '-map', '0:v:0', # Map first video stream
-                    '-map', '0:a:0', # Map first audio stream
+                    '-map', '0:v:0', '-map', '0:a:0'
                 ]
-                
-                for idx in allowed_subs:
-                    cmd.extend(['-map', f'0:{idx}'])
+                for idx in allowed_subs: cmd.extend(['-map', f'0:{idx}'])
 
                 cmd.extend([
-                    '-c:v', 'libsvtav1', '-preset', '2', '-crf', '63',
+                    '-c:v', 'libsvtav1', '-preset', '4', '-crf', '30', # Adjusted preset for speed/visuals
                     '-vf', 'scale=-2:480',
-                    '-c:a', 'libopus', '-b:a', '12k', '-ac', '1',
+                    '-c:a', 'libopus', '-b:a', '96k', '-ac', '2',
                     '-c:s', 'mov_text',
-                    '-progress', 'pipe:1', local_dst
+                    '-progress', 'pipe:1', 
+                    local_dst
                 ])
                 
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                 
                 last_rep = 0
+                frame_count = 0
+                
                 while True:
                     line = proc.stdout.readline()
                     if not line and proc.poll() is not None: break
+                    
                     if "out_time=" in line and "N/A" not in line and total_sec > 0:
-                        if time.time() - last_rep > 10:
-                            try:
-                                curr = get_seconds(line.split('=')[1].strip())
-                                pct = int((curr/total_sec)*100)
+                        try:
+                            time_str = line.split('=')[1].strip()
+                            curr_sec = get_seconds(time_str)
+                            pct = int((curr_sec/total_sec)*100)
+                            
+                            # Visual Bar
+                            if single_mode: 
+                                print_progress(worker_id, curr_sec, total_sec, prefix='Encoding   ')
+                            
+                            # Server Update (every 10s)
+                            if time.time() - last_rep > 10:
                                 requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"processing", "progress":pct})
                                 last_rep = time.time()
-                            except: pass
+                                if not single_mode: log(worker_id, f"Encoding: {pct}%")
+                                
+                        except: pass
+                
+                if single_mode: print_progress(worker_id, total_sec, total_sec, prefix='Encoding   ', suffix='Done')
 
-                if proc.returncode == 0:
-                    # --- UPLOADING ---
-                    print(f"[{worker_id}] Uploading: {job_id}")
+                if proc.returncode == 0 and os.path.exists(local_dst):
+                    # --- STEP 4: UPLOADING ---
+                    if not single_mode: log(worker_id, "Status: Uploading...")
                     requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"uploading", "progress":0})
                     
+                    # Upload wrapper for progress
                     class ProgressFileReader:
                         def __init__(self, filename, callback):
                             self._f = open(filename, 'rb')
@@ -154,6 +274,11 @@ def worker_task(worker_id, manager_url, temp_dir):
                         def read(self, size=-1):
                             data = self._f.read(size)
                             self._read += len(data)
+                            # Update visual bar immediately
+                            if single_mode: 
+                                print_progress(worker_id, self._read, self._total, prefix='Uploading  ')
+                            
+                            # Update server every 5s
                             if time.time() - self._last_time > 5:
                                 pct = int((self._read / self._total) * 100)
                                 self._callback(pct)
@@ -161,44 +286,79 @@ def worker_task(worker_id, manager_url, temp_dir):
                             return data
                         def __getattr__(self, attr): return getattr(self._f, attr)
 
-                    def upload_progress(pct):
-                        try: requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"uploading", "progress":pct})
+                    def upload_server_callback(pct):
+                        try: 
+                            requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"uploading", "progress":pct})
+                            if not single_mode: log(worker_id, f"Uploading: {pct}%")
                         except: pass
 
-                    with ProgressFileReader(local_dst, upload_progress) as f:
+                    with ProgressFileReader(local_dst, upload_server_callback) as f:
                         requests.post(f"{manager_url}/upload_result", files={'file': (job_id, f)}, data={'job_id': job_id, 'worker_id': worker_id})
                     
-                    print(f"[{worker_id}] Done: {job_id}")
+                    if single_mode: print_progress(worker_id, 100, 100, prefix='Uploading  ', suffix='Done')
+                    log(worker_id, f"Job Completed: {job_id}")
                 else:
-                    print(f"[{worker_id}] Failed: {job_id}"); requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"failed"})
+                    log(worker_id, f"FFmpeg failed or file missing. Return code: {proc.returncode}", "ERROR")
+                    requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"failed"})
 
+                # Cleanup
                 if os.path.exists(local_src): os.remove(local_src)
                 if os.path.exists(local_dst): os.remove(local_dst)
-            else: time.sleep(10)
-        except Exception as e: print(f"[{worker_id}] Error: {e}"); time.sleep(10)
+            else:
+                # No job found
+                if single_mode:
+                    sys.stdout.write(f"\r[{datetime.now().strftime('%H:%M:%S')}] [{worker_id}] Idle. Waiting for jobs...   ")
+                    sys.stdout.flush()
+                else:
+                    # In multi-thread mode, don't spam logs
+                    pass 
+                time.sleep(10)
+                
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            log(worker_id, f"Unexpected Error: {e}", "CRITICAL")
+            traceback.print_exc()
+            time.sleep(10)
 
 def run_worker(args):
+    print("==================================================")
+    print(" FRACTUM DISTRIBUTED WORKER")
+    print("==================================================")
+    
     check_ffmpeg()
-    # Fallback to defaults if args are missing/None
+    
     manager_url = (args.manager or DEFAULT_MANAGER_URL).rstrip('/')
     username = args.username or DEFAULT_USERNAME
     base_workername = args.workername or DEFAULT_WORKERNAME
     
-    # Concurrency limit
+    # Verify URL before starting
+    if not verify_connection(manager_url):
+        sys.exit(1)
+    
     num_jobs = args.jobs if args.jobs > 0 else 1
     if num_jobs > 32: num_jobs = 32
     
     print(f"[*] Starting {num_jobs} worker threads.")
-    print(f"[*] Base ID: {username}-{base_workername} | Manager: {manager_url}")
+    print(f"[*] ID: {username}-{base_workername} | Target: {manager_url}")
+    print("==================================================\n")
     
     threads = []
+    # If only 1 job, we enable the pretty progress bars
+    single_mode = (num_jobs == 1)
+    
     for i in range(num_jobs):
         worker_id = f"{username}-{base_workername}-{i+1}"
         temp_dir = f"./temp_encode_{base_workername}_{i+1}"
-        t = threading.Thread(target=worker_task, args=(worker_id, manager_url, temp_dir))
-        t.daemon = True
-        t.start()
-        threads.append(t)
+        
+        if num_jobs > 1:
+            t = threading.Thread(target=worker_task, args=(worker_id, manager_url, temp_dir, single_mode))
+            t.daemon = True
+            t.start()
+            threads.append(t)
+        else:
+            # Run directly in main thread for better control if single job
+            worker_task(worker_id, manager_url, temp_dir, single_mode)
         
     try:
         while True: time.sleep(1)
@@ -209,7 +369,7 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--username', default=None)
     p.add_argument('--workername', default=None)
-    p.add_argument('--jobs', type=int, default=0)
-    p.add_argument('--manager', default=None)
+    p.add_argument('--jobs', type=int, default=1)
+    p.add_argument('--manager', default=None, help="URL of the Manager (e.g., http://127.0.0.1:5000)")
     args = p.parse_args()
     run_worker(args)
