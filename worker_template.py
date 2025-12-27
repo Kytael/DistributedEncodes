@@ -115,23 +115,31 @@ def install_ffmpeg_windows():
                         sys.stdout.flush()
         print("") # Newline
 
-        print("[*] Extracting FFmpeg...")
+        print("[*] Extracting FFmpeg & FFprobe...")
         with zipfile.ZipFile(local_zip) as z:
             ffmpeg_path = None
+            ffprobe_path = None
             for name in z.namelist():
                 if name.endswith("bin/ffmpeg.exe"):
                     ffmpeg_path = name
-                    break
+                elif name.endswith("bin/ffprobe.exe"):
+                    ffprobe_path = name
             
             if not ffmpeg_path:
                 raise Exception("ffmpeg.exe not found in downloaded zip.")
             
             with open("ffmpeg.exe", "wb") as f_out:
                 f_out.write(z.read(ffmpeg_path))
+            
+            if ffprobe_path:
+                with open("ffprobe.exe", "wb") as f_out:
+                    f_out.write(z.read(ffprobe_path))
+            else:
+                print("[!] Warning: ffprobe.exe not found in zip.")
         
         # Cleanup
         os.remove(local_zip)
-        print("[*] FFmpeg downloaded and extracted to current directory.")
+        print("[*] FFmpeg & FFprobe downloaded and extracted to current directory.")
         return os.path.abspath(".")
     except Exception as e:
         print(f"[!] Failed to auto-install FFmpeg: {e}")
@@ -144,9 +152,10 @@ def check_ffmpeg():
     
     # Windows Auto-Install Logic
     if platform.system() == 'Windows':
-        if not shutil.which("ffmpeg"):
+        # Check if we need to setup local environment (if tools are missing from global PATH)
+        if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
             # Check if we have it locally from a previous run
-            if os.path.exists("ffmpeg.exe"):
+            if os.path.exists("ffmpeg.exe") and os.path.exists("ffprobe.exe"):
                  os.environ["PATH"] += os.pathsep + os.path.abspath(".")
             else:
                  install_dir = install_ffmpeg_windows()
@@ -160,11 +169,11 @@ def check_ffmpeg():
         except:
             return False
 
-    if shutil.which("ffmpeg") and has_svtav1():
+    if shutil.which("ffmpeg") and shutil.which("ffprobe") and has_svtav1():
         print("[*] FFmpeg with SVT-AV1 found. Good to go.")
         return
 
-    print("[!] FFmpeg with SVT-AV1 support not found or missing.")
+    print("[!] FFmpeg with SVT-AV1 support not found or missing (or ffprobe is missing).")
 
     # Linux/Mac Auto-Install Logic
     if platform.system() != 'Windows':
