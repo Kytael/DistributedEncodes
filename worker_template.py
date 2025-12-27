@@ -9,6 +9,8 @@ import threading
 import sys
 import traceback
 import platform
+import zipfile
+import io
 from datetime import datetime
 
 # ==============================================================================
@@ -62,10 +64,67 @@ def get_seconds(t):
     except:
         return 0
 
+def install_ffmpeg_windows():
+    """Downloads and installs FFmpeg for Windows automatically."""
+    print("[*] Downloading FFmpeg for Windows (approx. 100MB)...")
+    url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+    try:
+        r = requests.get(url, stream=True)
+        r.raise_for_status()
+        
+        local_zip = "ffmpeg_temp.zip"
+        total_size = int(r.headers.get('content-length', 0))
+        downloaded = 0
+        
+        with open(local_zip, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=32768):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        percent = int((downloaded / total_size) * 100)
+                        sys.stdout.write(f"\r[*] Downloading... {percent}%")
+                        sys.stdout.flush()
+        print("") # Newline
+
+        print("[*] Extracting FFmpeg...")
+        with zipfile.ZipFile(local_zip) as z:
+            ffmpeg_path = None
+            for name in z.namelist():
+                if name.endswith("bin/ffmpeg.exe"):
+                    ffmpeg_path = name
+                    break
+            
+            if not ffmpeg_path:
+                raise Exception("ffmpeg.exe not found in downloaded zip.")
+            
+            with open("ffmpeg.exe", "wb") as f_out:
+                f_out.write(z.read(ffmpeg_path))
+        
+        # Cleanup
+        os.remove(local_zip)
+        print("[*] FFmpeg downloaded and extracted to current directory.")
+        return os.path.abspath(".")
+    except Exception as e:
+        print(f"[!] Failed to auto-install FFmpeg: {e}")
+        if os.path.exists("ffmpeg_temp.zip"): os.remove("ffmpeg_temp.zip")
+        return None
+
 def check_ffmpeg():
     """Verifies FFmpeg installation and SVT-AV1 support."""
     print("[*] Checking FFmpeg installation...")
     
+    # Windows Auto-Install Logic
+    if platform.system() == 'Windows':
+        if not shutil.which("ffmpeg"):
+            # Check if we have it locally from a previous run
+            if os.path.exists("ffmpeg.exe"):
+                 os.environ["PATH"] += os.pathsep + os.path.abspath(".")
+            else:
+                 install_dir = install_ffmpeg_windows()
+                 if install_dir:
+                     os.environ["PATH"] += os.pathsep + install_dir
+
     def has_svtav1():
         try:
             res = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -78,29 +137,35 @@ def check_ffmpeg():
         return
 
     print("[!] FFmpeg with SVT-AV1 support not found or missing.")
-    print("[!] Attempting automatic installation...")
-    
-    try:
-        if shutil.which("apt-get"):
-            subprocess.run(["sudo", "apt-get", "update", "-qq"], check=True)
-            subprocess.run(["sudo", "apt-get", "install", "-y", "ffmpeg"], check=True)
-        elif shutil.which("dnf"):
-            subprocess.run(["sudo", "dnf", "install", "-y", "ffmpeg"], check=True)
-        elif shutil.which("brew"):
-            subprocess.run(["brew", "install", "ffmpeg"], check=True)
-        elif shutil.which("choco"):
-             subprocess.run(["choco", "install", "ffmpeg", "-y"], check=True)
-        else:
-            if not shutil.which("ffmpeg"): 
-                raise EnvironmentError("No supported package manager found.")
-        
-        if not has_svtav1():
-             raise EnvironmentError("Installed FFmpeg does not support libsvtav1 (SVT-AV1). Please install a custom build.")
-             
-        print("[*] Installation successful.")
-    except Exception as e:
-        print(f"[!] CRITICAL ERROR: {e}")
-        print("    Please install FFmpeg with libsvtav1 manually.")
+
+    # Linux/Mac Auto-Install Logic
+    if platform.system() != 'Windows':
+        print("[!] Attempting automatic installation...")
+        try:
+            if shutil.which("apt-get"):
+                subprocess.run(["sudo", "apt-get", "update", "-qq"], check=True)
+                subprocess.run(["sudo", "apt-get", "install", "-y", "ffmpeg"], check=True)
+            elif shutil.which("dnf"):
+                subprocess.run(["sudo", "dnf", "install", "-y", "ffmpeg"], check=True)
+            elif shutil.which("brew"):
+                subprocess.run(["brew", "install", "ffmpeg"], check=True)
+            else:
+                if not shutil.which("ffmpeg"): 
+                    raise EnvironmentError("No supported package manager found.")
+            
+            if not has_svtav1():
+                 raise EnvironmentError("Installed FFmpeg does not support libsvtav1 (SVT-AV1). Please install a custom build.")
+                 
+            print("[*] Installation successful.")
+        except Exception as e:
+            print(f"[!] CRITICAL ERROR: {e}")
+            print("    Please install FFmpeg with libsvtav1 manually.")
+            sys.exit(1)
+    else:
+        # Windows failed auto-install
+        print("[!] Automatic installation failed.")
+        print("    Please download FFmpeg (git-full build) from https://www.gyan.dev/ffmpeg/builds/")
+        print("    and place 'ffmpeg.exe' in this directory.")
         sys.exit(1)
 
 def verify_connection(manager_url):

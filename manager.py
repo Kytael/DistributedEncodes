@@ -8,6 +8,7 @@ import json
 import re
 from functools import wraps
 from datetime import datetime
+from urllib.parse import quote
 from flask import Flask, request, jsonify, render_template, send_from_directory, send_file, Response
 
 # ==============================================================================
@@ -129,7 +130,7 @@ def scan_and_queue():
     print("[*] Loading queue from database...")
     cursor.execute("SELECT id, filename FROM jobs WHERE status = 'queued'")
     for row in cursor.fetchall():
-        job_queue.put({"id": row[0], "filename": row[1], "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{row[0]}"})
+        job_queue.put({"id": row[0], "filename": row[1], "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(row[0], safe='/')}"})
     conn.close()
     print(f"[*] Queue ready. {job_queue.qsize()} jobs waiting.")
 
@@ -265,7 +266,7 @@ def admin_action():
             c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=? WHERE id=?", (datetime.now(), job_id))
             c.execute("SELECT filename FROM jobs WHERE id=?", (job_id,))
             row = c.fetchone()
-            if row: job_queue.put({"id": job_id, "filename": row[0], "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{job_id}"})
+            if row: job_queue.put({"id": job_id, "filename": row[0], "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(job_id, safe='/')}"})
         conn.commit(); conn.close()
     return jsonify({"status": "ok"})
 
@@ -296,7 +297,7 @@ def maintenance_loop():
                     if reset:
                         cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
                         # Re-queue in memory
-                        job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{jid}"})
+                        job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(jid, safe='/')}"})
 
                 # Rule 2: Reset if last_updated > 2 hours ago (Disconnected worker)
                 cursor.execute("SELECT id, filename, last_updated FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
@@ -321,7 +322,7 @@ def maintenance_loop():
                         # Actually manager gives jobs. If it's in queue twice, second get will be invalid status in DB?
                         # scan_and_queue checks DB status 'queued'.
                         # If we set DB status to 'queued', we must add to queue.
-                        job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{jid}"})
+                        job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(jid, safe='/')}"})
                 
                 conn.commit()
                 conn.close()
