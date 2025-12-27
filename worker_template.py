@@ -11,6 +11,7 @@ import traceback
 import platform
 import zipfile
 import io
+import json
 from datetime import datetime
 
 # ==============================================================================
@@ -19,6 +20,33 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
+
+# ==============================================================================
+# ENCODING CONFIGURATION - DO NOT MODIFY WITHOUT EXPLICIT USER INSTRUCTION
+# ==============================================================================
+# WARNING: These settings are critically tuned for specific requirements.
+# ANY CHANGES HERE BY LLMS MUST BE EXPLICITLY REQUESTED BY THE USER.
+# DO NOT "OPTIMIZE" OR "FIX" THESE SETTINGS AUTOMATICALLY.
+ENCODING_CONFIG = {
+    # VIDEO SETTINGS
+    "VIDEO_CODEC": "libsvtav1",
+    "VIDEO_PRESET": "2",
+    "VIDEO_CRF": "63",           # Smallest filesize
+    "VIDEO_PIX_FMT": "yuv420p",  # 8-bit
+    "VIDEO_SCALE": "scale=-2:480",
+    
+    # AUDIO SETTINGS
+    "AUDIO_CODEC": "libopus",
+    "AUDIO_BITRATE": "12k",      # 12kbps
+    "AUDIO_CHANNELS": "1",       # Mono
+    
+    # SUBTITLE SETTINGS
+    "SUBTITLE_CODEC": "mov_text", # MP4 compatibility
+    
+    # CONTAINER
+    "OUTPUT_EXT": ".mp4"
+}
+# ==============================================================================
 
 # ==============================================================================
 # HELPERS
@@ -220,7 +248,7 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                 log(worker_id, f"Received Job: {job_id} ({job['filename']})")
                 
                 local_src = os.path.join(temp_dir, "source.tmp")
-                local_dst = os.path.join(temp_dir, "encoded.mkv")
+                local_dst = os.path.join(temp_dir, f"encoded{ENCODING_CONFIG['OUTPUT_EXT']}")
                 
                 # --- STEP 1: DOWNLOADING ---
                 if not single_mode: log(worker_id, "Status: Downloading...")
@@ -258,38 +286,72 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                 # --- STEP 2: ANALYZE ---
                 total_sec = 0
                 total_min = 0
+                audio_index = 0
+                subtitle_indices = []
+                
                 try:
-                    res = subprocess.run(['ffmpeg', '-i', local_src], stderr=subprocess.PIPE, text=True)
-                    m = re.search(r"Duration: (\d{2}:\d{2}:\d{2}\.\d{2})", res.stderr)
-                    if m: 
-                        total_sec = get_seconds(m.group(1))
-                        total_min = int(total_sec/60)
-                except: pass
+                    # Probe for Duration and Streams
+                    cmd_probe = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', local_src]
+                    res = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    probe_data = json.loads(res.stdout)
+                    
+                    # 1. Duration
+                    dur = probe_data.get('format', {}).get('duration')
+                    if dur:
+                        total_sec = float(dur)
+                        total_min = int(total_sec / 60)
+                    
+                    # 2. Select Audio Stream (English > First)
+                    audio_streams = [s for s in probe_data.get('streams', []) if s['codec_type'] == 'audio']
+                    if audio_streams:
+                        # Default to first
+                        audio_index = audio_streams[0]['index']
+                        # Try to find english
+                        for s in audio_streams:
+                            lang = s.get('tags', {}).get('language', '').lower()
+                            # Check for 'eng', 'en', 'english'
+                            if lang in ['eng', 'en', 'english']:
+                                audio_index = s['index']
+                                break
+                    
+                    # 3. Subtitles
+                    for s in probe_data.get('streams', []):
+                        if s['codec_type'] == 'subtitle':
+                            # Whitelist text-based subtitles to reduce size (Excludes PGS/VOBSUB)
+                            cname = s.get('codec_name', '').lower()
+                            if cname in ['subrip', 'ass', 'webvtt', 'mov_text', 'text', 'srt', 'ssa']:
+                                subtitle_indices.append(s['index'])
+                            else:
+                                log(worker_id, f"Skipping non-text subtitle: {cname} (Index {s['index']})", "INFO")
+
+                except Exception as e:
+                    log(worker_id, f"Probe failed: {e}. Using defaults.", "WARN")
 
                 # --- STEP 3: ENCODING ---
-                log(worker_id, f"Starting Encode. Length: {total_min} mins.")
+                log(worker_id, f"Starting Encode. Length: {total_min} mins. Audio Index: {audio_index}")
                 requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"processing", "progress":0, "duration":total_min})
                 
-                # Identify subtitle streams
-                allowed_subs = []
-                try:
-                    for line in res.stderr.split('\n'):
-                        m_sub = re.search(r"Stream #0:(\d+).*Subtitle:\s*(subrip|ass|webvtt|mov_text|text)", line, re.IGNORECASE)
-                        if m_sub: allowed_subs.append(m_sub.group(1))
-                except: pass
-
                 # Build FFmpeg Command
                 cmd = [
                     'ffmpeg', '-y', '-i', local_src,
-                    '-map', '0:v:0', '-map', '0:a:0'
+                    '-map', '0:v:0',           # Map First Video
+                    '-map', f'0:{audio_index}' # Map Selected Audio
                 ]
-                for idx in allowed_subs: cmd.extend(['-map', f'0:{idx}'])
+                
+                # Map Subtitles
+                for idx in subtitle_indices: 
+                    cmd.extend(['-map', f'0:{idx}'])
 
                 cmd.extend([
-                    '-c:v', 'libsvtav1', '-preset', '4', '-crf', '30', # Adjusted preset for speed/visuals
-                    '-vf', 'scale=-2:480',
-                    '-c:a', 'libopus', '-b:a', '96k', '-ac', '2',
-                    '-c:s', 'mov_text',
+                    '-c:v', ENCODING_CONFIG["VIDEO_CODEC"], 
+                    '-preset', ENCODING_CONFIG["VIDEO_PRESET"], 
+                    '-crf', ENCODING_CONFIG["VIDEO_CRF"],
+                    '-pix_fmt', ENCODING_CONFIG["VIDEO_PIX_FMT"],
+                    '-vf', ENCODING_CONFIG["VIDEO_SCALE"],
+                    '-c:a', ENCODING_CONFIG["AUDIO_CODEC"], 
+                    '-b:a', ENCODING_CONFIG["AUDIO_BITRATE"],
+                    '-ac', ENCODING_CONFIG["AUDIO_CHANNELS"],
+                    '-c:s', ENCODING_CONFIG["SUBTITLE_CODEC"],
                     '-progress', 'pipe:1', 
                     local_dst
                 ])
