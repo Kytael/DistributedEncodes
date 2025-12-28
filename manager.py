@@ -157,14 +157,28 @@ def install_script():
 
     u = sanitize(request.args.get('username'), 'Anonymous')
     w = sanitize(request.args.get('workername'), 'LinuxNode')
-    j = request.args.get('jobs', '0')
-    if not j.isdigit(): j = '0'
+    
+    # [FIX] Default to 1 job if not specified
+    j = request.args.get('jobs', '1')
+    if not j.isdigit(): j = '1'
 
+    # [FIX] Use system packages (apt/dnf) for requests instead of pip/venv
     script = f"""#!/bin/bash
 echo "[*] Initializing Worker for {SERVER_URL_DISPLAY}..."
-if [ -x "$(command -v apt-get)" ]; then sudo apt-get update -qq > /dev/null && sudo apt-get install -y ffmpeg python3 python3-pip > /dev/null; elif [ -x "$(command -v dnf)" ]; then sudo dnf install -y ffmpeg python3 python3-pip; fi
-pip3 install requests --break-system-packages 2>/dev/null || pip3 install requests > /dev/null
+
+# 1. Install System Dependencies (ffmpeg & python3-requests)
+if [ -x "$(command -v apt-get)" ]; then 
+    sudo apt-get update -qq > /dev/null
+    sudo apt-get install -y ffmpeg python3 python3-requests > /dev/null
+elif [ -x "$(command -v dnf)" ]; then 
+    sudo dnf install -y ffmpeg python3 python3-requests
+fi
+
+# 2. Download Worker
 curl -s "{SERVER_URL_DISPLAY.rstrip('/')}/dl/worker" -o worker.py
+
+# 3. Run Worker
+echo "[*] Starting Worker..."
 python3 worker.py --username "{u}" --workername "{w}" --jobs {j} --manager "{SERVER_URL_DISPLAY}"
 """
     return Response(script, mimetype='text/x-shellscript')
