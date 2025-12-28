@@ -262,7 +262,7 @@ def report_status():
 def api_stats():
     with db_lock:
         conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
-        c.execute("SELECT worker_id, SUM(duration) as total_minutes, COUNT(*) as files_count FROM jobs WHERE status='completed' AND worker_id IS NOT NULL GROUP BY worker_id ORDER BY total_minutes DESC")
+        c.execute("SELECT CASE WHEN instr(worker_id, '-') > 0 THEN substr(worker_id, 1, instr(worker_id, '-') - 1) ELSE worker_id END as worker_id, SUM(duration) as total_minutes, COUNT(*) as files_count FROM jobs WHERE status='completed' AND worker_id IS NOT NULL GROUP BY 1 ORDER BY total_minutes DESC")
         sb = [dict(r) for r in c.fetchall()]
         c.execute("SELECT worker_id, filename, duration, progress, status FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
         act = [dict(r) for r in c.fetchall()]
