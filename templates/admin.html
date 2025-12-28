@@ -2,41 +2,211 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Encode Admin</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FRACTUM :: ADMIN</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
-        body { font-family: sans-serif; background: #121212; color: #e0e0e0; padding: 20px; }
-        h1 { color: #f44336; border-bottom: 1px solid #333; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { padding: 12px; border-bottom: 1px solid #333; text-align: left; }
-        .status-failed { color: #f44336; font-weight: bold; }
-        .status-completed { color: #4CAF50; }
-        button { padding: 5px 10px; border: none; cursor: pointer; color: white; margin-right: 5px; }
-        .btn-retry { background: #4CAF50; } .btn-delete { background: #f44336; }
-        a { color: #4CAF50; text-decoration: none; font-size: 1.1em; }
+        :root {
+            /* Theme Variables matching Dashboard */
+            --bg-dark: #000000;
+            --bg-panel: #0a0a0a;
+            --neon-purple: #cc00ff;
+            --neon-pink: #ff00aa;
+            --neon-green: #00ff41;
+            --neon-red: #ff3333;
+            --text-light: #e0e0e0;
+            --text-dim: #888888;
+            --font: 'Roboto Mono', monospace;
+        }
+        
+        *, *::before, *::after {
+            box-sizing: border-box;
+        }
+        
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            font-family: var(--font);
+            padding: 20px;
+            margin: 0;
+            background-image: 
+                linear-gradient(to right, rgba(204,0,255,0.05) 1px, transparent 1px),
+                linear-gradient(to bottom, rgba(204,0,255,0.05) 1px, transparent 1px);
+            background-size: 25px 25px;
+        }
+
+        .dashboard-container {
+            max-width: 1200px;
+            width: 100%;
+            margin: 0 auto;
+            border: 2px solid var(--neon-purple);
+            background-color: rgba(10, 10, 10, 0.9);
+            box-shadow: 0 0 15px var(--neon-purple), inset 0 0 10px rgba(204,0,255,0.2);
+            padding: 25px;
+            border-radius: 5px;
+        }
+        
+        /* Header */
+        .header-container { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 30px; 
+            border-bottom: 1px dashed var(--neon-purple);
+            padding-bottom: 15px;
+            flex-wrap: wrap; 
+            gap: 20px; 
+        }
+        .header-title-group {
+            display: flex;
+            flex-direction: column;
+        }
+        .back-link {
+            color: var(--text-dim);
+            text-decoration: none;
+            font-size: 0.8em;
+            margin-bottom: 5px;
+            transition: color 0.2s;
+        }
+        .back-link:hover {
+            color: var(--neon-pink);
+            text-shadow: 0 0 5px var(--neon-pink);
+        }
+        h1 { 
+            color: var(--neon-pink); 
+            text-transform: uppercase; 
+            letter-spacing: 2px; 
+            text-shadow: 0 0 8px var(--neon-pink); 
+            margin: 0; 
+            font-size: 1.8em;
+            word-break: break-word; 
+        }
+
+        /* Cards and Tables */
+        .card { 
+            background: rgba(0,0,0,0.3); 
+            border: 1px solid var(--neon-pink); 
+            padding: 20px; 
+            box-shadow: 0 0 8px rgba(255,0,170,0.2);
+            overflow-x: auto; 
+        }
+        .card-header { 
+            border-bottom: 1px dashed var(--neon-pink); 
+            padding-bottom: 10px; 
+            margin-bottom: 15px; 
+        }
+        .card h3 { 
+            margin: 0; padding: 0; color: var(--neon-pink); font-size: 1.2em; text-shadow: 0 0 5px var(--neon-pink);
+        }
+        
+        table { width: 100%; border-collapse: collapse; font-size: 0.9em; table-layout: fixed; }
+        td, th { padding: 10px 5px; border-bottom: 1px dotted rgba(204,0,255,0.3); text-align: left; vertical-align: middle; }
+        th { color: var(--neon-purple); text-transform: uppercase; letter-spacing: 1px; }
+        tr:last-child td { border-bottom: none; }
+        
+        /* Status Colors */
+        @keyframes pulse { from { opacity: 0.7; } to { opacity: 1; } }
+
+        .status-failed { color: var(--neon-red); text-shadow: 0 0 5px var(--neon-red); font-weight: bold; }
+        .status-completed { color: var(--neon-green); text-shadow: 0 0 5px var(--neon-green); }
+        .status-queued { color: var(--text-dim); }
+        .status-processing { color: var(--neon-pink); animation: pulse 1.5s infinite alternate; }
+        .status-downloading { color: var(--neon-purple); animation: pulse 1.5s infinite alternate; }
+        .status-uploading { color: var(--neon-green); animation: pulse 0.5s infinite alternate; }
+
+
+        /* Buttons */
+        button { 
+            background: transparent; 
+            border: 1px solid var(--text-dim); 
+            color: var(--text-light); 
+            padding: 5px 10px; 
+            cursor: pointer; 
+            font-family: var(--font); 
+            font-size: 0.8em;
+            text-transform: uppercase;
+            transition: all 0.2s; 
+            margin-right: 5px;
+        }
+        button:hover {
+            box-shadow: 0 0 8px currentColor;
+        }
+        
+        .btn-retry { border-color: var(--neon-green); color: var(--neon-green); }
+        .btn-retry:hover { background: rgba(0,255,65,0.1); }
+        
+        .btn-delete { border-color: var(--neon-red); color: var(--neon-red); }
+        .btn-delete:hover { background: rgba(255,51,51,0.1); }
+
+        .file-name {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 300px;
+            display: block;
+        }
     </style>
     <script>
         function loadJobs() {
             fetch('/api/all_jobs').then(r => r.json()).then(data => {
                 let html = "";
                 data.jobs.forEach(j => {
-                    html += `<tr><td>${j.id}</td><td class="status-${j.status}">${j.status}</td><td>
-                    ${(j.status === 'failed' || j.status === 'completed') ? `<button class="btn-retry" onclick="act('${j.id}','retry')">Retry</button>` : ''}
-                    <button class="btn-delete" onclick="act('${j.id}','delete')">Delete</button></td></tr>`;
+                    const cleanName = j.id.split('/').pop();
+                    html += `<tr>
+                        <td><span class="file-name" title="${j.id}">${cleanName}</span></td>
+                        <td class="status-${j.status}">${j.status.toUpperCase()}</td>
+                        <td>
+                            ${(j.status === 'failed' || j.status === 'completed') ? `<button class="btn-retry" onclick="act('${j.id}','retry')">[ RETRY ]</button>` : ''}
+                            <button class="btn-delete" onclick="act('${j.id}','delete')">[ DELETE ]</button>
+                        </td>
+                    </tr>`;
                 });
-                document.getElementById('list').innerHTML = html;
+                document.getElementById('list').innerHTML = html || '<tr><td colspan="3" style="text-align:center; padding:20px; color:var(--text-dim);">// NO JOBS FOUND //</td></tr>';
             });
         }
         function act(id, action) {
-            if(confirm(action + " " + id + "?")) {
-                fetch('/api/admin_action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({job_id:id, action:action})}).then(()=>loadJobs());
+            if(confirm("CONFIRM ACTION: " + action.toUpperCase() + "\nTarget: " + id)) {
+                fetch('/api/admin_action', {
+                    method:'POST', 
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({job_id:id, action:action})
+                }).then(()=>loadJobs());
             }
         }
         window.onload = loadJobs;
     </script>
 </head>
 <body>
-    <a href="/">← Dashboard</a>
-    <h1>Job Administration</h1>
-    <table><thead><tr><th>File</th><th>Status</th><th>Actions</th></tr></thead><tbody id="list"></tbody></table>
+    <div class="dashboard-container">
+        <div class="header-container">
+            <div class="header-title-group">
+                <a href="/" class="back-link">&lt;&lt; BACK TO DASHBOARD</a>
+                <h1>// ADMIN_CONSOLE</h1>
+            </div>
+            <div>
+                <button onclick="loadJobs()" style="border-color: var(--neon-purple); color: var(--neon-purple);">[ REFRESH LIST ]</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h3>>> JOB_REGISTRY</h3>
+            </div>
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 50%">FILENAME</th>
+                            <th style="width: 20%">STATUS</th>
+                            <th style="width: 30%">ACTIONS</th>
+                        </tr>
+                    </thead>
+                    <tbody id="list">
+                        <tr><td colspan="3" style="text-align:center; padding:20px; color:var(--text-dim);">// LOADING DATA...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
