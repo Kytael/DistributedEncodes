@@ -353,9 +353,8 @@
                         <td style="width: 40px; color:var(--text-dim)">#${i+1}</td>
                         <td style="font-weight:bold; color:var(--text-light)">${u.name}</td>
                         <td style="text-align:right; color:var(--neon-purple)">${fmtTime(u.time)}</td>
-                        <td style="text-align:right; width: 60px;">[${u.count}]</td>
                     </tr>`
-                ).join('') : '<tr><td colspan="4" style="text-align:center; color:var(--text-dim); padding:20px;">// NO DATA //</td></tr>';
+                ).join('') : '<tr><td colspan="3" style="text-align:center; color:var(--text-dim); padding:20px;">// NO DATA //</td></tr>';
                 
                 const act = document.getElementById('active-list');
                 act.innerHTML = data.active.length ? data.active.map(j => {
