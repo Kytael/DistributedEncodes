@@ -594,3 +594,13 @@ def run_worker(args):
     except KeyboardInterrupt:
         print("\n[*] Stopping workers...")
         SHUTDOWN_EVENT.set()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Fractum Distributed Worker")
+    parser.add_argument("--manager", help="Manager URL", default=DEFAULT_MANAGER_URL)
+    parser.add_argument("--username", help="Worker Username", default=DEFAULT_USERNAME)
+    parser.add_argument("--workername", help="Worker Name", default=DEFAULT_WORKERNAME)
+    parser.add_argument("--jobs", type=int, help="Number of concurrent jobs", default=1)
+
+    args = parser.parse_args()
+    run_worker(args)
