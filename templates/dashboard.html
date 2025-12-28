@@ -314,7 +314,7 @@
         async function update() {
             try {
                 // Fetch from existing manager.py endpoint
-                const res = await fetch(API_URL);
+                const res = await fetch(`${API_URL}?filter=${currentFilter}`);
                 if (!res.ok) throw new Error("API Offline");
                 const rawData = await res.json();
                 

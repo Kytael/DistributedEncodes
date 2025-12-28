@@ -260,9 +260,16 @@ def report_status():
 
 @app.route('/api/stats')
 def api_stats():
+    filter_val = request.args.get('filter')
+    time_filter = ""
+    if filter_val == '24h':
+        time_filter = " AND last_updated > datetime('now', '-1 day')"
+    elif filter_val == '30d':
+        time_filter = " AND last_updated > datetime('now', '-30 days')"
+
     with db_lock:
         conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
-        c.execute("SELECT CASE WHEN instr(worker_id, '-') > 0 THEN substr(worker_id, 1, instr(worker_id, '-') - 1) ELSE worker_id END as worker_id, SUM(duration) as total_minutes, COUNT(*) as files_count FROM jobs WHERE status='completed' AND worker_id IS NOT NULL GROUP BY 1 ORDER BY total_minutes DESC")
+        c.execute(f"SELECT CASE WHEN instr(worker_id, '-') > 0 THEN substr(worker_id, 1, instr(worker_id, '-') - 1) ELSE worker_id END as worker_id, SUM(duration) as total_minutes, COUNT(*) as files_count FROM jobs WHERE status='completed' AND worker_id IS NOT NULL {time_filter} GROUP BY 1 ORDER BY total_minutes DESC")
         sb = [dict(r) for r in c.fetchall()]
         c.execute("SELECT worker_id, filename, duration, progress, status FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
         act = [dict(r) for r in c.fetchall()]
