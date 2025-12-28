@@ -20,7 +20,7 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.0.2"
+WORKER_VERSION = "1.0.3"
 
 # --- UPDATE COORDINATION ---
 SHUTDOWN_EVENT = threading.Event()
@@ -337,8 +337,8 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                                 f.write(chunk)
                                 downloaded += len(chunk)
                                 
-                                # Report to server every 5s
-                                if time.time() - last_rep > 5:
+                                # Report to server every 30s
+                                if time.time() - last_rep > 30:
                                     pct = int((downloaded/total_size)*100) if total_size > 0 else 0
                                     requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"downloading", "progress":pct})
                                     last_rep = time.time()
@@ -480,8 +480,8 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                             if single_mode: 
                                 print_progress(worker_id, self._read, self._total, prefix='Uploading  ')
                             
-                            # Update server every 5s
-                            if time.time() - self._last_time > 5:
+                            # Update server every 30s
+                            if time.time() - self._last_time > 30:
                                 pct = int((self._read / self._total) * 100)
                                 self._callback(pct)
                                 self._last_time = time.time()
