@@ -22,6 +22,12 @@ DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
 WORKER_VERSION = "1.0.2"
 
+# --- UPDATE COORDINATION ---
+SHUTDOWN_EVENT = threading.Event()
+UPDATE_AVAILABLE = False
+LAST_UPDATE_CHECK = 0
+CHECK_LOCK = threading.Lock()
+
 # ==============================================================================
 # ENCODING CONFIGURATION - DO NOT MODIFY WITHOUT EXPLICIT USER INSTRUCTION
 # ==============================================================================
@@ -53,8 +59,15 @@ ENCODING_CONFIG = {
 # HELPERS
 # ==============================================================================
 
-def check_for_updates(manager_url):
-    """Checks the manager for a newer version of this script and updates if found."""
+def check_version(manager_url):
+    """Checks if a newer version exists. Returns True if update found."""
+    global LAST_UPDATE_CHECK
+    with CHECK_LOCK:
+        # Debounce checks (10 minutes)
+        if time.time() - LAST_UPDATE_CHECK < 600:
+            return False
+        LAST_UPDATE_CHECK = time.time()
+
     print(f"[*] Checking for updates (Current: {WORKER_VERSION})...")
     try:
         url = f"{manager_url}/dl/worker"
@@ -62,32 +75,35 @@ def check_for_updates(manager_url):
         
         if r.status_code == 200:
             new_content = r.text
-            # Simple regex to find version in remote file
             match = re.search(r'WORKER_VERSION\s*=\s*"([^"]+)"', new_content)
-            
             if match:
                 remote_version = match.group(1)
                 if remote_version != WORKER_VERSION:
                     print(f"[!] Update found: {WORKER_VERSION} -> {remote_version}")
-                    print("[*] Downloading and applying update...")
-                    
-                    # Overwrite current script
-                    script_path = os.path.abspath(sys.argv[0])
-                    with open(script_path, 'w', encoding='utf-8') as f:
-                        f.write(new_content)
-                        
-                    print("[*] Restarting worker...")
-                    # Restart the process
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
-                else:
-                    print("[*] Worker is up to date.")
-            else:
-                print("[!] Warning: Could not determine remote version. Skipping update.")
-        else:
-            print(f"[!] Update check failed: Server returned {r.status_code}")
-            
+                    return True
     except Exception as e:
         print(f"[!] Update check failed: {e}")
+    
+    return False
+
+def apply_update(manager_url):
+    """Downloads and restarts the worker."""
+    print("[*] Downloading and applying update...")
+    try:
+        url = f"{manager_url}/dl/worker"
+        r = requests.get(url, timeout=30)
+        if r.status_code == 200:
+            # Overwrite current script
+            script_path = os.path.abspath(sys.argv[0])
+            with open(script_path, 'w', encoding='utf-8') as f:
+                f.write(r.text)
+                
+            print("[*] Restarting worker...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        else:
+            print("[!] Update download failed.")
+    except Exception as e:
+        print(f"[!] Failed to apply update: {e}")
 
 def log(worker_id, message, level="INFO"):
     """Thread-safe logging with timestamps."""
@@ -271,17 +287,27 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
     The main lifecycle of a worker thread.
     single_mode: If True, enables visual progress bars.
     """
+    global UPDATE_AVAILABLE
     log(worker_id, "Thread started. Polling for jobs...")
     os.makedirs(temp_dir, exist_ok=True)
     
-    while True:
+    while not SHUTDOWN_EVENT.is_set():
         try:
+            # 0. Check for Updates periodically
+            if check_version(manager_url):
+                UPDATE_AVAILABLE = True
+                SHUTDOWN_EVENT.set()
+                break
+
             # 1. Request Job
             try:
                 r = requests.get(f"{manager_url}/get_job", timeout=10)
             except requests.exceptions.RequestException as e:
                 log(worker_id, f"Connection lost: {e}. Retrying in 30s...", "WARN")
-                time.sleep(30)
+                # Wait 30s, but check shutdown often
+                for _ in range(30):
+                    if SHUTDOWN_EVENT.is_set(): break
+                    time.sleep(1)
                 continue
 
             data = r.json() if r.status_code == 200 else None
@@ -513,8 +539,9 @@ def run_worker(args):
     if not verify_connection(manager_url):
         sys.exit(1)
     
-    # Check for updates
-    check_for_updates(manager_url)
+    # Initial Check
+    if check_version(manager_url):
+        apply_update(manager_url)
     
     num_jobs = args.jobs if args.jobs > 0 else 1
     if num_jobs > 32: num_jobs = 32
@@ -539,17 +566,32 @@ def run_worker(args):
         else:
             # Run directly in main thread for better control if single job
             worker_task(worker_id, manager_url, temp_dir, single_mode)
+            # If main thread returns, it means update or exit
+            if UPDATE_AVAILABLE:
+                apply_update(manager_url)
+            return
         
     try:
-        while True: time.sleep(1)
+        # Multi-thread Monitor Loop
+        while True:
+            all_dead = True
+            for t in threads:
+                if t.is_alive():
+                    all_dead = False
+                    break
+            
+            if all_dead:
+                break
+
+            if SHUTDOWN_EVENT.is_set():
+                # Wait for threads to finish naturally (they break loop on next iteration)
+                pass
+            
+            time.sleep(1)
+            
+        if UPDATE_AVAILABLE:
+            apply_update(manager_url)
+
     except KeyboardInterrupt:
         print("\n[*] Stopping workers...")
-
-if __name__ == '__main__':
-    p = argparse.ArgumentParser()
-    p.add_argument('--username', default=None)
-    p.add_argument('--workername', default=None)
-    p.add_argument('--jobs', type=int, default=1)
-    p.add_argument('--manager', default=None, help="URL of the Manager (e.g., http://127.0.0.1:5000)")
-    args = p.parse_args()
-    run_worker(args)
+        SHUTDOWN_EVENT.set()
