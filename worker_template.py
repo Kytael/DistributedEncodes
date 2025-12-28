@@ -29,10 +29,9 @@ LAST_UPDATE_CHECK = 0
 CHECK_LOCK = threading.Lock()
 
 # ==============================================================================
-# ENCODING CONFIGURATION - DO NOT MODIFY WITHOUT EXPLICIT USER INSTRUCTION
+# ENCODING CONFIGURATION - DO NOT MODIFY WITHOUT EXPLICIT INSTRUCTION
 # ==============================================================================
 # WARNING: These settings are critically tuned for specific requirements.
-# ANY CHANGES HERE BY LLMS MUST BE EXPLICITLY REQUESTED BY THE USER.
 # DO NOT "OPTIMIZE" OR "FIX" THESE SETTINGS AUTOMATICALLY.
 ENCODING_CONFIG = {
     # VIDEO SETTINGS
