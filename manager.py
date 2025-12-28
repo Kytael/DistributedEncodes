@@ -191,8 +191,12 @@ def get_job():
 def upload_result():
     job_id = request.form.get('job_id')
     if 'file' in request.files and job_id:
+        # [FIX] Change extension to .mp4
+        base_name, _ = os.path.splitext(job_id)
+        new_filename = base_name + ".mp4"
+
         # Security check: Prevent path traversal
-        save_path = os.path.abspath(os.path.join(COMPLETED_DIRECTORY, job_id))
+        save_path = os.path.abspath(os.path.join(COMPLETED_DIRECTORY, new_filename))
         completed_abs = os.path.abspath(COMPLETED_DIRECTORY)
         if not save_path.startswith(completed_abs):
              with db_lock:
