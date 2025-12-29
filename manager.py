@@ -10,11 +10,11 @@ from functools import wraps
 from datetime import datetime
 from urllib.parse import quote
 from flask import Flask, request, jsonify, render_template, send_from_directory, send_file, Response
+import shutil
 
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-import shutil
 
 if not os.path.exists('config.py'):
     if os.path.exists('config.py.example'):
@@ -77,8 +77,31 @@ def init_db():
                 started_at TIMESTAMP
             )
         ''')
+        # Create logs table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS system_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TIMESTAMP,
+                level TEXT,
+                message TEXT,
+                related_id TEXT
+            )
+        ''')
         conn.commit()
         conn.close()
+
+def log_event(level, message, related_id=None):
+    """Logs an event to the database and prints to console."""
+    try:
+        with db_lock:
+            conn = sqlite3.connect(DB_FILE)
+            conn.execute("INSERT INTO system_logs (timestamp, level, message, related_id) VALUES (?, ?, ?, ?)",
+                         (datetime.now(), level, str(message), related_id))
+            conn.commit()
+            conn.close()
+        print(f"[{level}] {message}") 
+    except Exception as e:
+        print(f"[!] Logging failed: {e}")
 
 def verify_upload(filepath):
     """Verifies that the uploaded file matches the strict encoding rules."""
@@ -158,11 +181,9 @@ def install_script():
     u = sanitize(request.args.get('username'), 'Anonymous')
     w = sanitize(request.args.get('workername'), 'LinuxNode')
     
-    # [FIX] Default to 1 job if not specified
     j = request.args.get('jobs', '1')
     if not j.isdigit(): j = '1'
 
-    # [FIX] Use system packages (apt/dnf) for requests instead of pip/venv
     script = f"""#!/bin/bash
 echo "[*] Initializing Worker for {SERVER_URL_DISPLAY}..."
 
@@ -193,8 +214,7 @@ def get_job():
             job = job_queue.get_nowait()
             queued_job_ids.discard(job['id'])
             
-            # Mark as processing immediately so no one else gets it (if logic changes) 
-            # and to persist state across server restarts if queue was persistent (it isn't, but DB is).
+            # Mark as processing immediately so no one else gets it
             conn = sqlite3.connect(DB_FILE)
             conn.execute("UPDATE jobs SET status='processing', last_updated=?, started_at=? WHERE id=?", (datetime.now(), datetime.now(), job['id']))
             conn.commit(); conn.close()
@@ -204,12 +224,10 @@ def get_job():
 @app.route('/upload_result', methods=['POST'])
 def upload_result():
     job_id = request.form.get('job_id')
-    # [FIX] Capture worker_id and duration from the upload form data
     worker_id = request.form.get('worker_id')
     duration = request.form.get('duration', 0)
 
     if 'file' in request.files and job_id:
-        # [FIX] Change extension to .mp4
         base_name, _ = os.path.splitext(job_id)
         new_filename = base_name + ".mp4"
 
@@ -217,6 +235,8 @@ def upload_result():
         save_path = os.path.abspath(os.path.join(COMPLETED_DIRECTORY, new_filename))
         completed_abs = os.path.abspath(COMPLETED_DIRECTORY)
         if not save_path.startswith(completed_abs):
+             msg = "Security Alert: Path traversal attempt detected."
+             log_event("CRITICAL", msg, job_id)
              with db_lock:
                  conn = sqlite3.connect(DB_FILE)
                  conn.execute("UPDATE jobs SET status='failed', last_updated=? WHERE id=?", (datetime.now(), job_id))
@@ -229,7 +249,7 @@ def upload_result():
         # --- VERIFICATION ---
         is_valid, reason = verify_upload(save_path)
         if not is_valid:
-            print(f"[!] Rejected upload {job_id}: {reason}")
+            log_event("ERROR", f"Verification Failed: {reason}", job_id)
             os.remove(save_path) # Delete bad file
             # Mark as failed in DB
             with db_lock:
@@ -238,7 +258,6 @@ def upload_result():
                 conn.commit(); conn.close()
             return jsonify({"status": "error", "message": f"Verification failed: {reason}"}), 400
 
-        # [FIX] Explicitly update worker_id on completion to ensure credit is given
         with db_lock:
             conn = sqlite3.connect(DB_FILE)
             if worker_id:
@@ -247,8 +266,10 @@ def upload_result():
                 conn.execute("UPDATE jobs SET status='completed', progress=100, last_updated=? WHERE id=?", (datetime.now(), job_id))
             conn.commit(); conn.close()
             
-        print(f"[+] Received & Verified: {job_id} from {worker_id}")
+        log_event("INFO", f"Job completed successfully by {worker_id}", job_id)
         return jsonify({"status": "success"})
+    
+    log_event("WARN", "Invalid upload request received (missing file or ID)")
     return jsonify({"status": "error"}), 400
 
 @app.route('/report_status', methods=['POST'])
@@ -307,6 +328,19 @@ def api_all_jobs():
         jobs = [dict(r) for r in c.fetchall()]; conn.close()
         return jsonify({"jobs": jobs})
 
+@app.route('/api/logs')
+@requires_auth
+def get_logs():
+    limit = request.args.get('limit', 50)
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM system_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
+        logs = [dict(r) for r in c.fetchall()]
+        conn.close()
+    return jsonify({"logs": logs})
+
 @app.route('/api/admin_action', methods=['POST'])
 @requires_auth
 def admin_action():
@@ -335,7 +369,6 @@ def maintenance_loop():
                 now = datetime.now()
                 
                 # Rule 1: Reset if assigned > 24 hours ago (Stuck job)
-                # We need to handle cases where started_at might be NULL (legacy jobs)
                 cursor.execute("SELECT id, filename, started_at FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
                 for row in cursor.fetchall():
                     jid, fname, started = row
@@ -346,8 +379,8 @@ def maintenance_loop():
                             s_time = datetime.strptime(started, "%Y-%m-%d %H:%M:%S.%f")
                             if (now - s_time).total_seconds() > 86400: # 24 hours
                                 reset = True
-                                print(f"[!] Job {jid} timed out (24h limit). Resetting.")
-                        except: pass # Parsing error or different format
+                                log_event("WARN", "Job timed out (24h limit). Resetting.", jid)
+                        except: pass 
                     
                     if reset:
                         cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
@@ -367,18 +400,11 @@ def maintenance_loop():
                             l_time = datetime.strptime(last_up, "%Y-%m-%d %H:%M:%S.%f")
                             if (now - l_time).total_seconds() > 7200: # 2 hours
                                 reset = True
-                                print(f"[!] Job {jid} zombie worker (2h silence). Resetting.")
+                                log_event("WARN", "Zombie worker detected (2h silence). Resetting.", jid)
                         except: pass
                     
                     if reset:
-                        # Only reset if not already reset by Rule 1 (though redundant update is fine)
                         cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
-                        # Re-queue if not already in queue (this is tricky with in-memory queue, but duplicate put is safer than lost job)
-                        # To avoid duplicate in queue, we could check queue, but that's O(N).
-                        # Simple approach: Just put it back. Workers handle duplicates if they grab same ID? 
-                        # Actually manager gives jobs. If it's in queue twice, second get will be invalid status in DB?
-                        # scan_and_queue checks DB status 'queued'.
-                        # If we set DB status to 'queued', we must add to queue.
                         job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(jid, safe='/')}"})
                 
                 conn.commit()
