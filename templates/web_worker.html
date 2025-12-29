@@ -204,9 +204,15 @@
 
         <div class="card">
             <div class="card-header">>> CONFIGURATION</div>
-            <div style="margin-bottom: 20px;">
-                <label>WORKER_ID:</label>
-                <input type="text" id="workerName" value="">
+            <div style="margin-bottom: 20px; display: flex; gap: 20px; flex-wrap: wrap;">
+                <div>
+                    <label>USERNAME:</label>
+                    <input type="text" id="username" value="Anonymous" style="width: 200px;">
+                </div>
+                <div>
+                    <label>WORKER_NAME:</label>
+                    <input type="text" id="workerName" value="WebNode" style="width: 200px;">
+                </div>
             </div>
             <div>
                 <button id="btnStart" class="btn-control" onclick="startLoop()">[ EXECUTE ]</button>
@@ -221,10 +227,9 @@
     </div>
 
 <script>
-    // Set default name: Anonymous-WebNode-{timestamp}-1
+    // Set default name logic if needed, but we hardcoded defaults in HTML for simplicity
     document.addEventListener("DOMContentLoaded", () => {
-        const ts = Math.floor(Date.now() / 1000);
-        document.getElementById('workerName').value = `Anonymous-WebNode-${ts}-1`;
+        // Optional: Pre-fill specific logic if required
     });
 
     let isRunning = false;
@@ -234,6 +239,8 @@
     function toggleButtons(active) {
         document.getElementById('btnStart').style.display = active ? 'none' : 'inline-block';
         document.getElementById('btnStop').style.display = active ? 'inline-block' : 'none';
+        document.getElementById('username').disabled = active;
+        document.getElementById('workerName').disabled = active;
     }
 
     function stopLoop() {
@@ -247,10 +254,17 @@
             return;
         }
 
+        const user = document.getElementById('username').value.trim() || "Anonymous";
+        const node = document.getElementById('workerName').value.trim() || "WebNode";
+        // Format: Username-WorkerName-Timestamp-ThreadID
+        // We use a fixed timestamp per session start to identify this specific run instance
+        const runId = Math.floor(Date.now() / 1000); 
+        const fullWorkerId = `${user}-${node}-${runId}-1`;
+
         isRunning = true;
         toggleButtons(true);
-        const workerName = document.getElementById('workerName').value;
-        log(`Worker [${workerName}] Started. Polling for jobs...`, 'succ');
+        
+        log(`Worker [${fullWorkerId}] Started. Polling for jobs...`, 'succ');
 
         while (isRunning) {
             try {
@@ -266,7 +280,7 @@
                 }
 
                 if (data.status === 'ok') {
-                    await processJob(data.job, workerName);
+                    await processJob(data.job, fullWorkerId);
                 }
 
             } catch (e) {
