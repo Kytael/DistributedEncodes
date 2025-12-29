@@ -37,8 +37,44 @@ self.Module = {
 // Load FFmpeg WASM
 importScripts('ffmpeg.js?v=' + Date.now());
 
+// Global tracker for the expected output file
+let currentOutputPath = null;
+
 // Capture Emscripten's message handler (if any) to preserve Pthread communication
 const emscriptenOnMessage = self.onmessage;
+
+self.Module.quit = function(status, toThrow) {
+    postMessage({type: 'log', level: 'sys', msg: `FFmpeg exit with status ${status}`});
+    if (self.resolveJob) {
+        if (status === 0) {
+            // Check if output exists to distinguish between "thread spawned" exit and "job done" exit
+            const FS = self.Module.FS || self.FS;
+            let exists = false;
+            if (currentOutputPath) {
+                try {
+                    FS.stat(currentOutputPath);
+                    exists = true;
+                } catch(e) {}
+            }
+
+            if (exists) {
+                self.resolveJob();
+                self.resolveJob = null;
+                self.rejectJob = null;
+            } else {
+                postMessage({type: 'log', level: 'sys', msg: "Ignored exit(0) - Output file not found (async spawn detection)."});
+                // Do NOT clear callbacks, keep waiting for the real exit
+            }
+        } else {
+            // Non-zero status is always an error/end
+            self.rejectJob(new Error(`FFmpeg exited with status ${status}`));
+            self.resolveJob = null;
+            self.rejectJob = null;
+        }
+    }
+    // Emscripten expects quit to throw to stop execution
+    if (toThrow) throw toThrow;
+};
 
 self.onmessage = async function(e) {
     const msg = e.data;
@@ -122,6 +158,9 @@ async function processJob(job) {
             outputPath
         ];
 
+        // Set expected output path for quit handler
+        currentOutputPath = outputPath;
+
         // Wrap execution in a promise to wait for completion
         const ffmpegPromise = new Promise((resolve, reject) => {
             self.resolveJob = resolve;
@@ -172,6 +211,7 @@ async function processJob(job) {
     } catch (e) {
         throw e;
     } finally {
+        currentOutputPath = null;
         // Cleanup
         try {
             if (FS) {
