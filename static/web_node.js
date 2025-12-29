@@ -20,6 +20,8 @@ self.Module = {
     mainScriptUrlOrBlob: basePath + "/ffmpeg.js",
     noInitialRun: true,
     noExitRuntime: true,
+    // Prevent FS re-initialization which wipes our input file
+    noFSInit: true, 
     // We handle exit manually to detect job completion
     quit: function(status, toThrow) {
         postMessage({type: 'log', level: 'sys', msg: `FFmpeg exit with status ${status}`});
