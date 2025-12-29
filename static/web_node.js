@@ -105,7 +105,7 @@ async function processJob(job) {
         
         // STRICT ENCODING CONFIGURATION
         const args = [
-            '-threads', '1', 
+            '-threads', '4', 
             '-v', 'verbose',
             '-i', inputPath,
             '-c:v', 'libsvtav1',

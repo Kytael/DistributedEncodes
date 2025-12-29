@@ -10,6 +10,7 @@ from functools import wraps
 from datetime import datetime
 from urllib.parse import quote
 from flask import Flask, request, jsonify, render_template, send_from_directory, send_file, Response
+from werkzeug.exceptions import HTTPException
 import shutil
 import traceback
 
@@ -496,6 +497,7 @@ def api_rescan():
 def handle_exception(e):
     # Pass through HTTP errors
     if isinstance(e,  Response): return e
+    if isinstance(e, HTTPException): return e
     
     # Log the error
     log_event("CRITICAL", f"Unhandled Exception: {str(e)}\n{traceback.format_exc()}")
