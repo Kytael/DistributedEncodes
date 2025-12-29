@@ -195,6 +195,19 @@
             }
         }
         
+        function rescanDB() {
+            if(confirm("Start full file scan? This might take a moment.")) {
+                fetch('/api/rescan_db')
+                .then(r => r.json())
+                .then(data => {
+                    alert(data.message);
+                    loadJobs();
+                    loadLogs();
+                })
+                .catch(err => alert("Error: " + err));
+            }
+        }
+        
         window.onload = function() {
             loadJobs();
             loadLogs();
@@ -209,6 +222,7 @@
                 <h1>// ADMIN_CONSOLE</h1>
             </div>
             <div>
+                <button onclick="rescanDB()" style="border-color: var(--neon-green); color: var(--neon-green); margin-right: 15px;">[ RESCAN DB ]</button>
                 <button onclick="loadJobs()" style="border-color: var(--neon-purple); color: var(--neon-purple);">[ REFRESH LIST ]</button>
             </div>
         </div>

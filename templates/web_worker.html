@@ -269,8 +269,8 @@
         while (isRunning) {
             try {
                 // A. GET JOB
-                // log("Checking for jobs...", 'sys'); // verbose
-                const res = await fetch('/get_job');
+                // Request max 1GB job for web node stability
+                const res = await fetch('/get_job?max_size_mb=1024');
                 const data = await res.json();
 
                 if (data.status === 'empty') {
@@ -304,12 +304,29 @@
             // B. DOWNLOAD
             log("Downloading source...", 'sys');
             const dl = await fetch(job.download_url);
+            
+            // [SAFETY] Check file size before loading into RAM
+            const contentLength = dl.headers.get('content-length');
+            if (contentLength) {
+                const sizeMB = parseInt(contentLength) / (1024 * 1024);
+                if (sizeMB > 1024) { // 1GB Limit
+                    throw new Error(`File too large for Web Node (${sizeMB.toFixed(2)} MB). Limit is 1GB.`);
+                }
+            }
+
             const buf = await dl.arrayBuffer();
-            const data = new Uint8Array(buf);
+            let data = new Uint8Array(buf);
             
             // C. WRITE TO VIRTUAL FS
+            if (!Module.FS) throw new Error("FFmpeg FileSystem (FS) not initialized. WASM may have failed to load.");
+            
             log(`Writing ${data.length} bytes to Virtual FS: ${inputName}`, 'sys');
             Module.FS.writeFile(inputName, data);
+
+            // [MEMORY] Free JS memory immediately
+            data = null; 
+            // Note: 'buf' is const but we lose reference to the wrapper 'data'. 
+            // To be thorough, we can't null 'buf' if it's const, so we rely on 'data = null' and scope exit.
 
             // D. EXECUTE (Synchronous callMain)
             log("EXECUTE: callMain(). Browser will FREEZE now...", 'err');

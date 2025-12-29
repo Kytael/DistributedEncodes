@@ -90,7 +90,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY, filename TEXT, status TEXT, worker_id TEXT,
                 progress INTEGER DEFAULT 0, duration INTEGER DEFAULT 0, last_updated TIMESTAMP,
-                started_at TIMESTAMP
+                started_at TIMESTAMP, file_size INTEGER DEFAULT 0
             )
         ''')
         # Create logs table
@@ -103,6 +103,13 @@ def init_db():
                 related_id TEXT
             )
         ''')
+        
+        # Migration: Add file_size to existing tables
+        try:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN file_size INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass # Column likely exists
+            
         conn.commit()
         conn.close()
 
@@ -176,21 +183,32 @@ def scan_and_queue():
             if file.lower().endswith(VIDEO_EXTENSIONS):
                 full_path = os.path.join(root, file)
                 rel_path = os.path.relpath(full_path, SOURCE_DIRECTORY)
+                fsize = os.path.getsize(full_path)
+                
                 cursor.execute("SELECT id FROM jobs WHERE id=?", (rel_path,))
                 if not cursor.fetchone():
-                    cursor.execute("INSERT INTO jobs (id, filename, status, last_updated) VALUES (?, ?, 'queued', ?)", (rel_path, file, datetime.now()))
+                    cursor.execute("INSERT INTO jobs (id, filename, status, last_updated, file_size) VALUES (?, ?, 'queued', ?, ?)", (rel_path, file, datetime.now(), fsize))
                     count_new += 1
+                else:
+                    # Update size for existing records if 0 (migration fix)
+                    cursor.execute("UPDATE jobs SET file_size=? WHERE id=? AND file_size=0", (fsize, rel_path))
+                    
     conn.commit()
     if count_new > 0:
         log_event("INFO", f"Scanner found {count_new} new files.")
 
     # 2. Load queue
     print("[*] Loading queue from database...")
-    cursor.execute("SELECT id, filename FROM jobs WHERE status = 'queued'")
+    cursor.execute("SELECT id, filename, file_size FROM jobs WHERE status = 'queued'")
     loaded_count = 0
     for row in cursor.fetchall():
         if row[0] not in queued_job_ids:
-            job_queue.put({"id": row[0], "filename": row[1], "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(row[0], safe='/')}"})
+            job_queue.put({
+                "id": row[0], 
+                "filename": row[1], 
+                "file_size": row[2],
+                "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(row[0], safe='/')}"
+            })
             queued_job_ids.add(row[0])
             loaded_count += 1
     conn.close()
@@ -245,17 +263,73 @@ def download_source(filename): return send_from_directory(SOURCE_DIRECTORY, file
 
 @app.route('/get_job', methods=['GET'])
 def get_job():
+    max_size_mb = request.args.get('max_size_mb')
+
+    # --- FILTERED MODE (e.g., Web Workers) ---
+    if max_size_mb and max_size_mb.isdigit():
+        limit_bytes = int(max_size_mb) * 1024 * 1024
+        try:
+            with db_lock:
+                conn = sqlite3.connect(DB_FILE)
+                conn.row_factory = sqlite3.Row
+                c = conn.cursor()
+                # Find oldest queued job fitting the size limit
+                c.execute("SELECT id, filename, file_size FROM jobs WHERE status='queued' AND file_size <= ? ORDER BY last_updated ASC LIMIT 1", (limit_bytes,))
+                row = c.fetchone()
+                
+                if row:
+                    job = dict(row)
+                    job['download_url'] = f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(job['id'], safe='/')}"
+                    
+                    # Mark as processing immediately
+                    conn.execute("UPDATE jobs SET status='processing', last_updated=?, started_at=? WHERE id=?", (datetime.now(), datetime.now(), job['id']))
+                    conn.commit()
+                    conn.close()
+                    
+                    # Note: We don't remove from job_queue here. 
+                    # The standard workers will pop it later, check DB, see it's processing, and skip it.
+                    return jsonify({"status": "ok", "job": job})
+                
+                conn.close()
+                return jsonify({"status": "empty"}) # No jobs small enough
+        except Exception as e:
+            log_event("ERROR", f"Filtered get_job failed: {e}")
+            return jsonify({"status": "error"}), 500
+
+    # --- STANDARD MODE (FIFO Queue) ---
     try:
-        with db_lock:
-            job = job_queue.get_nowait()
-            queued_job_ids.discard(job['id'])
-            
-            # Mark as processing
-            conn = sqlite3.connect(DB_FILE)
-            conn.execute("UPDATE jobs SET status='processing', last_updated=?, started_at=? WHERE id=?", (datetime.now(), datetime.now(), job['id']))
-            conn.commit(); conn.close()
-        return jsonify({"status": "ok", "job": job})
-    except queue.Empty: return jsonify({"status": "empty"})
+        start_time = time.time()
+        while True:
+            # Prevent infinite loops if DB is out of sync
+            if time.time() - start_time > 5: return jsonify({"status": "empty"})
+
+            try:
+                job = job_queue.get_nowait()
+            except queue.Empty:
+                return jsonify({"status": "empty"})
+
+            with db_lock:
+                conn = sqlite3.connect(DB_FILE)
+                cursor = conn.cursor()
+                cursor.execute("SELECT status FROM jobs WHERE id=?", (job['id'],))
+                row = cursor.fetchone()
+                
+                if row and row[0] == 'queued':
+                    # Valid job, take it
+                    cursor.execute("UPDATE jobs SET status='processing', last_updated=?, started_at=? WHERE id=?", (datetime.now(), datetime.now(), job['id']))
+                    conn.commit()
+                    conn.close()
+                    queued_job_ids.discard(job['id'])
+                    return jsonify({"status": "ok", "job": job})
+                else:
+                    # Job already taken (by filtered request) or cancelled
+                    conn.close()
+                    queued_job_ids.discard(job['id'])
+                    continue # Try next one
+
+    except Exception as e:
+        log_event("ERROR", f"Standard get_job failed: {e}")
+        return jsonify({"status": "error"}), 500
 
 @app.route('/upload_result', methods=['POST'])
 def upload_result():
@@ -406,6 +480,16 @@ def admin_action():
                  queued_job_ids.add(job_id)
         conn.commit(); conn.close()
     return jsonify({"status": "ok"})
+
+@app.route('/api/rescan_db')
+@requires_auth
+def api_rescan():
+    """Manually triggers the file scanner to find new files and backfill sizes."""
+    try:
+        scan_and_queue()
+        return jsonify({"status": "ok", "message": "Rescan completed successfully."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # [NEW] Global Exception Handler
 @app.errorhandler(Exception)
