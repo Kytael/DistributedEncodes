@@ -15,16 +15,6 @@ self.Module = {
             postMessage({type: 'log', level: 'err', msg: "Runtime initialized but FS missing."});
         }
     },
-    preRun: [function() {
-        const FS = self.Module.FS || self.FS;
-        try {
-            FS.mkdir('/work');
-        } catch(e) { console.log("Mkdir error (might exist): " + e); }
-        
-        try {
-            FS.mount(self.Module.MEMFS, {}, '/work');
-        } catch(e) { console.log("Mount error (might be mounted): " + e); }
-    }],
     // CRITICAL: Point Pthreads to the actual Emscripten JS file, NOT this worker wrapper.
     // Otherwise, Pthreads import web_node.js -> import ffmpeg.js -> infinite loop or broken context.
     mainScriptUrlOrBlob: basePath + "/ffmpeg.js",
@@ -78,11 +68,10 @@ async function processJob(job) {
         throw new Error(`FFmpeg primitives missing. FS: ${!!FS}, callMain: ${!!callMain}`);
     }
 
-    // Use /work directory to avoid /tmp mount issues and ensure clean state
-    const inputFilename = "input.mp4";
-    const outputFilename = "output.mp4";
-    const inputPath = "/work/" + inputFilename;
-    const outputPath = "/work/" + outputFilename;
+    const inputFilename = "input_" + Date.now() + ".mp4";
+    const outputFilename = "output_" + Date.now() + ".mp4";
+    const inputPath = "/tmp/" + inputFilename;
+    const outputPath = "/tmp/" + outputFilename;
 
     postMessage({type: 'log', level: 'sys', msg: `Worker processing: ${job.filename}`});
 
@@ -98,13 +87,12 @@ async function processJob(job) {
         // 2. Write to MEMFS
         postMessage({type: 'log', level: 'sys', msg: `Writing ${data.length} bytes to ${inputPath}`});
         
-        // Cleanup previous runs just in case
-        try { FS.unlink(inputPath); } catch(e) {}
-        try { FS.unlink(outputPath); } catch(e) {}
+        // Ensure /tmp exists
+        try { FS.mkdir('/tmp'); } catch(e) {}
         
         FS.writeFile(inputPath, data);
         
-        // Verify input exists
+        // Verify input exists (sanity check)
         try {
             const stat = FS.stat(inputPath);
             postMessage({type: 'log', level: 'sys', msg: `Input file verified on FS: ${stat.size} bytes`});
@@ -158,9 +146,9 @@ async function processJob(job) {
         } catch(e) { exists = false; }
 
         if (!exists) {
-            // Debug: List /work to see what happened
+            // Debug: List /tmp to see what happened
             try {
-                postMessage({type: 'log', level: 'err', msg: `Work dir content: ${JSON.stringify(FS.readdir('/work'))}`});
+                postMessage({type: 'log', level: 'err', msg: `/tmp content: ${JSON.stringify(FS.readdir('/tmp'))}`});
             } catch(e){}
             throw new Error("FFmpeg did not create output file (check logs for errors).");
         }
