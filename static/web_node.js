@@ -68,10 +68,11 @@ async function processJob(job) {
         throw new Error(`FFmpeg primitives missing. FS: ${!!FS}, callMain: ${!!callMain}`);
     }
 
-    const inputFilename = "input_" + Date.now() + ".mp4";
-    const outputFilename = "output_" + Date.now() + ".mp4";
-    const inputPath = "/tmp/" + inputFilename;
-    const outputPath = "/tmp/" + outputFilename;
+    // Use root directory to avoid /tmp mount issues
+    const inputFilename = "input.mp4";
+    const outputFilename = "output.mp4";
+    const inputPath = "/" + inputFilename;
+    const outputPath = "/" + outputFilename;
 
     postMessage({type: 'log', level: 'sys', msg: `Worker processing: ${job.filename}`});
 
@@ -87,40 +88,39 @@ async function processJob(job) {
         // 2. Write to MEMFS
         postMessage({type: 'log', level: 'sys', msg: `Writing ${data.length} bytes to ${inputPath}`});
         
-        // Ensure /tmp exists
-        try { FS.mkdir('/tmp'); } catch(e) {}
+        // Cleanup previous runs just in case
+        try { FS.unlink(inputPath); } catch(e) {}
+        try { FS.unlink(outputPath); } catch(e) {}
         
         FS.writeFile(inputPath, data);
-
-        // DEBUG: Verify file existence
+        
+        // Verify input exists
         try {
-            const tmpFiles = FS.readdir('/tmp');
-            postMessage({type: 'log', level: 'sys', msg: `DEBUG: /tmp contents: ${JSON.stringify(tmpFiles)}`});
-            const cwd = FS.cwd();
-            postMessage({type: 'log', level: 'sys', msg: `DEBUG: CWD: ${cwd}`});
             const stat = FS.stat(inputPath);
-            postMessage({type: 'log', level: 'sys', msg: `DEBUG: Input file stat: ${stat.size} bytes`});
+            postMessage({type: 'log', level: 'sys', msg: `Input file verified on FS: ${stat.size} bytes`});
         } catch(e) {
-            postMessage({type: 'log', level: 'err', msg: `DEBUG: File check failed: ${e.message}`});
+            throw new Error(`Failed to verify input file at ${inputPath} after write.`);
         }
         
         // 3. Execute
         postMessage({type: 'log', level: 'sys', msg: "Starting FFmpeg..."});
         
-        // SVT-AV1 Arguments
+        // STRICT ENCODING CONFIGURATION
         const args = [
             '-threads', '1', 
             '-v', 'verbose',
             '-i', inputPath,
             '-c:v', 'libsvtav1',
-            '-preset', '8',
-            '-crf', '35',
+            '-preset', '2',
+            '-crf', '63',
             '-g', '240',
-            '-pix_fmt', 'yuv420p10le', 
+            '-pix_fmt', 'yuv420p', 
             '-svtav1-params', 'tune=0',
+            '-vf', 'scale=-2:480',
             '-c:a', 'libopus',
-            '-b:a', '128k',
+            '-b:a', '12k',
             '-ac', '1',
+            '-c:s', 'mov_text',
             outputPath
         ];
 
@@ -144,12 +144,13 @@ async function processJob(job) {
         try {
             const stat = FS.stat(outputPath);
             exists = true;
+            postMessage({type: 'log', level: 'sys', msg: `Output file size: ${stat.size} bytes`});
         } catch(e) { exists = false; }
 
         if (!exists) {
-            // Debug: List /tmp to see what happened
+            // Debug: List root to see what happened
             try {
-                postMessage({type: 'log', level: 'err', msg: `/tmp content: ${JSON.stringify(FS.readdir('/tmp'))}`});
+                postMessage({type: 'log', level: 'err', msg: `Root content: ${JSON.stringify(FS.readdir('/'))}`});
             } catch(e){}
             throw new Error("FFmpeg did not create output file (check logs for errors).");
         }
