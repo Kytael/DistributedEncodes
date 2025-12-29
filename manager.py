@@ -204,6 +204,10 @@ def get_job():
 @app.route('/upload_result', methods=['POST'])
 def upload_result():
     job_id = request.form.get('job_id')
+    # [FIX] Capture worker_id and duration from the upload form data
+    worker_id = request.form.get('worker_id')
+    duration = request.form.get('duration', 0)
+
     if 'file' in request.files and job_id:
         # [FIX] Change extension to .mp4
         base_name, _ = os.path.splitext(job_id)
@@ -234,11 +238,16 @@ def upload_result():
                 conn.commit(); conn.close()
             return jsonify({"status": "error", "message": f"Verification failed: {reason}"}), 400
 
+        # [FIX] Explicitly update worker_id on completion to ensure credit is given
         with db_lock:
             conn = sqlite3.connect(DB_FILE)
-            conn.execute("UPDATE jobs SET status='completed', progress=100, last_updated=? WHERE id=?", (datetime.now(), job_id))
+            if worker_id:
+                conn.execute("UPDATE jobs SET status='completed', progress=100, worker_id=?, last_updated=? WHERE id=?", (worker_id, datetime.now(), job_id))
+            else:
+                conn.execute("UPDATE jobs SET status='completed', progress=100, last_updated=? WHERE id=?", (datetime.now(), job_id))
             conn.commit(); conn.close()
-        print(f"[+] Received & Verified: {job_id}")
+            
+        print(f"[+] Received & Verified: {job_id} from {worker_id}")
         return jsonify({"status": "success"})
     return jsonify({"status": "error"}), 400
 
