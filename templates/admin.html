@@ -164,6 +164,27 @@
                 document.getElementById('list').innerHTML = html || '<tr><td colspan="3" style="text-align:center; padding:20px; color:var(--text-dim);">// NO JOBS FOUND //</td></tr>';
             });
         }
+        
+        function loadLogs() {
+            fetch('/api/logs').then(r => r.json()).then(data => {
+                let html = "";
+                data.logs.forEach(l => {
+                    let color = 'var(--text-light)';
+                    if(l.level === 'ERROR' || l.level === 'CRITICAL') color = 'var(--neon-red)';
+                    if(l.level === 'WARN') color = '#ffaa00';
+                    if(l.level === 'INFO') color = 'var(--neon-green)';
+                    
+                    html += `<tr>
+                        <td style="color:var(--text-dim); font-size:0.8em; white-space:nowrap;">${l.timestamp}</td>
+                        <td style="color:${color}; font-weight:bold">${l.level}</td>
+                        <td style="word-break: break-all;">${l.message}</td>
+                        <td style="font-family:monospace; font-size:0.8em; color:var(--text-dim);">${l.related_id || '-'}</td>
+                    </tr>`;
+                });
+                document.getElementById('log-list').innerHTML = html || '<tr><td colspan="4" style="text-align:center; padding:20px; color:var(--text-dim);">// NO LOGS FOUND //</td></tr>';
+            });
+        }
+
         function act(id, action) {
             if(confirm("CONFIRM ACTION: " + action.toUpperCase() + "\nTarget: " + id)) {
                 fetch('/api/admin_action', {
@@ -173,7 +194,11 @@
                 }).then(()=>loadJobs());
             }
         }
-        window.onload = loadJobs;
+        
+        window.onload = function() {
+            loadJobs();
+            loadLogs();
+        };
     </script>
 </head>
 <body>
@@ -203,6 +228,28 @@
                     </thead>
                     <tbody id="list">
                         <tr><td colspan="3" style="text-align:center; padding:20px; color:var(--text-dim);">// LOADING DATA...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <div class="card" style="margin-top: 25px;">
+            <div class="card-header">
+                <h3>>> SYSTEM_LOGS</h3>
+                <button onclick="loadLogs()" style="float:right; border-color: var(--neon-purple); color: var(--neon-purple);">[ REFRESH LOGS ]</button>
+            </div>
+            <div style="max-height: 400px; overflow-y: auto;">
+                <table id="log-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 20%">TIME</th>
+                            <th style="width: 10%">LEVEL</th>
+                            <th style="width: 50%">MESSAGE</th>
+                            <th style="width: 20%">RELATED ID</th>
+                        </tr>
+                    </thead>
+                    <tbody id="log-list">
+                        <tr><td colspan="4" style="text-align:center; padding:20px; color:var(--text-dim);">// LOADING LOGS...</td></tr>
                     </tbody>
                 </table>
             </div>
