@@ -12,6 +12,8 @@ import platform
 import zipfile
 import io
 import json
+import signal
+import ctypes # Added for Windows process control
 from datetime import datetime
 
 # ==============================================================================
@@ -20,7 +22,7 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.0.6" # Bumped version
+WORKER_VERSION = "1.0.8" # Bumped version for Windows Pause Support
 
 # --- UPDATE COORDINATION ---
 SHUTDOWN_EVENT = threading.Event()
@@ -33,26 +35,23 @@ CONSOLE_LOCK = threading.Lock()
 PROGRESS_LOCK = threading.Lock()
 WORKER_PROGRESS = {} 
 
+# --- PROCESS MANAGEMENT ---
+ACTIVE_PROCS = {}
+PROC_LOCK = threading.Lock()
+
 # ==============================================================================
 # ENCODING CONFIGURATION
 # ==============================================================================
 ENCODING_CONFIG = {
-    # VIDEO SETTINGS
     "VIDEO_CODEC": "libsvtav1",
     "VIDEO_PRESET": "2",
     "VIDEO_CRF": "63",           
     "VIDEO_PIX_FMT": "yuv420p",  
     "VIDEO_SCALE": "scale=-2:480",
-    
-    # AUDIO SETTINGS
     "AUDIO_CODEC": "libopus",
     "AUDIO_BITRATE": "12k",      
     "AUDIO_CHANNELS": "1",       
-    
-    # SUBTITLE SETTINGS
     "SUBTITLE_CODEC": "mov_text", 
-    
-    # CONTAINER
     "OUTPUT_EXT": ".mp4"
 }
 # ==============================================================================
@@ -64,43 +63,89 @@ ENCODING_CONFIG = {
 def safe_print(message):
     """Thread-safe print that clears the current line (status bar) first."""
     with CONSOLE_LOCK:
-        # Clear line with spaces then CR to return to start
         sys.stdout.write('\r' + ' ' * 100 + '\r')
         print(message)
         sys.stdout.flush()
 
 def log(worker_id, message, level="INFO"):
-    """Thread-safe logging with timestamps."""
     timestamp = datetime.now().strftime("%H:%M:%S")
     safe_print(f"[{timestamp}] [{worker_id}] [{level}] {message}")
 
+def suspend_windows_process(pid):
+    """Low-level process suspension for Windows using ntdll."""
+    try:
+        kernel32 = ctypes.windll.kernel32
+        ntdll = ctypes.windll.ntdll
+        # Open process with PROCESS_ALL_ACCESS (0x1F0FFF)
+        handle = kernel32.OpenProcess(0x1F0FFF, False, pid)
+        if handle:
+            ntdll.NtSuspendProcess(handle)
+            kernel32.CloseHandle(handle)
+            return True
+    except Exception as e:
+        safe_print(f"[!] WinSuspend Error: {e}")
+    return False
+
+def resume_windows_process(pid):
+    """Low-level process resumption for Windows using ntdll."""
+    try:
+        kernel32 = ctypes.windll.kernel32
+        ntdll = ctypes.windll.ntdll
+        handle = kernel32.OpenProcess(0x1F0FFF, False, pid)
+        if handle:
+            ntdll.NtResumeProcess(handle)
+            kernel32.CloseHandle(handle)
+            return True
+    except: pass
+    return False
+
+def toggle_processes(suspend=True):
+    """Pauses or Resumes all active FFmpeg subprocesses."""
+    with PROC_LOCK:
+        for wid, proc in ACTIVE_PROCS.items():
+            if proc.poll() is None: # Only if running
+                try:
+                    if platform.system() == 'Windows':
+                        if suspend:
+                            suspend_windows_process(proc.pid)
+                        else:
+                            resume_windows_process(proc.pid)
+                    else:
+                        # Linux/macOS
+                        sig = signal.SIGSTOP if suspend else signal.SIGCONT
+                        os.kill(proc.pid, sig)
+                except Exception as e:
+                    safe_print(f"[!] Failed to toggle process state: {e}")
+
+def kill_processes():
+    """Force kills all active subprocesses."""
+    with PROC_LOCK:
+        for wid, proc in ACTIVE_PROCS.items():
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except: pass
+
 def check_version(manager_url):
-    """Checks if a newer version exists. Returns True if update found."""
     global LAST_UPDATE_CHECK
     with CHECK_LOCK:
-        if time.time() - LAST_UPDATE_CHECK < 600:
-            return False
+        if time.time() - LAST_UPDATE_CHECK < 600: return False
         LAST_UPDATE_CHECK = time.time()
 
     try:
         url = f"{manager_url}/dl/worker"
         r = requests.get(url, timeout=10)
-        
         if r.status_code == 200:
             new_content = r.text
             match = re.search(r'WORKER_VERSION\s*=\s*"([^"]+)"', new_content)
             if match:
-                remote_version = match.group(1)
-                if remote_version != WORKER_VERSION:
-                    safe_print(f"[!] Update found: {WORKER_VERSION} -> {remote_version}")
+                if match.group(1) != WORKER_VERSION:
+                    safe_print(f"[!] Update found: {WORKER_VERSION} -> {match.group(1)}")
                     return True
-    except Exception as e:
-        safe_print(f"[!] Update check failed: {e}")
-    
+    except: pass
     return False
 
 def apply_update(manager_url):
-    """Downloads and restarts the worker."""
     safe_print("[*] Downloading and applying update...")
     try:
         url = f"{manager_url}/dl/worker"
@@ -109,54 +154,38 @@ def apply_update(manager_url):
             script_path = os.path.abspath(sys.argv[0])
             with open(script_path, 'w', encoding='utf-8') as f:
                 f.write(r.text)
-                
             safe_print("[*] Restarting worker...")
             os.execv(sys.executable, [sys.executable] + sys.argv)
-        else:
-            safe_print("[!] Update download failed.")
     except Exception as e:
         safe_print(f"[!] Failed to apply update: {e}")
 
 def print_progress(worker_id, current, total, prefix='', suffix=''):
-    """Draws a progress bar. Only used in single-thread mode."""
     if total <= 0: return
-    
     percent = 100 * (current / float(total))
     if percent > 100: percent = 100
-    
     length = 40
     filled_length = int(length * current // total)
     bar = '█' * filled_length + '-' * (length - filled_length)
-    
     with CONSOLE_LOCK:
         sys.stdout.write(f'\r[{datetime.now().strftime("%H:%M:%S")}] [{worker_id}] {prefix} |{bar}| {percent:.1f}% {suffix}')
         sys.stdout.flush()
-    
-    if current >= total:
-        sys.stdout.write('\n')
+    if current >= total: sys.stdout.write('\n')
 
 def monitor_status_loop(worker_ids):
-    """Background thread that prints a combined status line for all workers."""
     while not SHUTDOWN_EVENT.is_set():
         parts = []
         with PROGRESS_LOCK:
             for wid in sorted(worker_ids, key=lambda x: x.split('-')[-1]):
-                try:
-                    short_id = wid.split('-')[-1]
-                except:
-                    short_id = wid
-                
+                try: short_id = wid.split('-')[-1]
+                except: short_id = wid
                 state = WORKER_PROGRESS.get(wid, "Idle")
                 parts.append(f"[{short_id}: {state}]")
-        
         if parts:
             line = " ".join(parts)
             if len(line) > 110: line = line[:107] + "..."
-            
             with CONSOLE_LOCK:
                 sys.stdout.write('\r' + line.ljust(110))
                 sys.stdout.flush()
-        
         time.sleep(0.5)
 
 def get_seconds(t):
@@ -332,7 +361,19 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                 log(worker_id, f"FFmpeg: {ENCODING_CONFIG['VIDEO_CODEC']} (CRF {ENCODING_CONFIG['VIDEO_CRF']})")
                 
                 start_enc = time.time()
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                
+                # --- PROCESS ISOLATION FOR PAUSE ---
+                popen_kwargs = {}
+                if platform.system() == 'Windows':
+                    popen_kwargs['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP
+                else:
+                    popen_kwargs['preexec_fn'] = os.setsid
+
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **popen_kwargs)
+                
+                with PROC_LOCK:
+                    ACTIVE_PROCS[worker_id] = proc
+
                 last_rep = 0
                 
                 while True:
@@ -353,6 +394,9 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                                 last_rep = time.time()
                         except: pass
                 
+                with PROC_LOCK:
+                    if worker_id in ACTIVE_PROCS: del ACTIVE_PROCS[worker_id]
+
                 enc_time = time.time() - start_enc
                 if single_mode: print_progress(worker_id, total_sec, total_sec, prefix='Encoding   ', suffix='Done')
 
@@ -384,7 +428,6 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                         try: requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"uploading", "progress":pct})
                         except: pass
 
-                    # [FIX] Check response status code for errors
                     with ProgressFileReader(local_dst, upload_server_callback) as f:
                         response = requests.post(f"{manager_url}/upload_result", files={'file': (job_id, f)}, data={'job_id': job_id, 'worker_id': worker_id, 'duration': total_min})
                     
@@ -396,7 +439,10 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                         log(worker_id, f"Upload REJECTED by server: {response.text}", "ERROR")
 
                 else:
-                    log(worker_id, f"FFmpeg failed. Return code: {proc.returncode}", "ERROR")
+                    if SHUTDOWN_EVENT.is_set() and proc.returncode != 0:
+                        log(worker_id, "Encode aborted by user.", "WARN")
+                    else:
+                        log(worker_id, f"FFmpeg failed. Return code: {proc.returncode}", "ERROR")
                     requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"failed"})
 
                 if os.path.exists(local_src): os.remove(local_src)
@@ -464,14 +510,44 @@ def run_worker(args):
             for t in threads:
                 if t.is_alive(): all_dead = False; break
             if all_dead: break
-            if SHUTDOWN_EVENT.is_set(): pass
+            if SHUTDOWN_EVENT.is_set(): break
             time.sleep(1)
             
-        if UPDATE_AVAILABLE: apply_update(manager_url)
-
     except KeyboardInterrupt:
-        print("\n[*] Stopping workers...")
-        SHUTDOWN_EVENT.set()
+        safe_print("\n\n" + "="*50)
+        safe_print(" [!] PAUSED (User Interrupt)")
+        safe_print("="*50)
+        
+        toggle_processes(suspend=True)
+        
+        while True:
+            try:
+                print("\nOptions:")
+                print("  [C]ontinue  - Resume encoding immediately.")
+                print("  [F]inish    - Finish current job(s) then stop.")
+                print("  [S]top      - Abort all jobs and exit now.")
+                
+                choice = input("\nSelect Option [c/f/s]: ").strip().lower()
+                
+                if choice == 'c':
+                    safe_print("[*] Resuming...")
+                    toggle_processes(suspend=False)
+                    run_worker(args) 
+                    return
+                elif choice == 'f':
+                    safe_print("[*] Stopping after current jobs finish (Draining)...")
+                    toggle_processes(suspend=False)
+                    SHUTDOWN_EVENT.set()
+                    break
+                elif choice == 's':
+                    safe_print("[*] Aborting all jobs...")
+                    toggle_processes(suspend=False)
+                    kill_processes()
+                    SHUTDOWN_EVENT.set()
+                    break
+            except KeyboardInterrupt: pass
+    
+    if UPDATE_AVAILABLE: apply_update(manager_url)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fractum Distributed Worker")
