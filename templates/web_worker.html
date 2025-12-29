@@ -270,8 +270,8 @@
         while (isRunning) {
             try {
                 // A. GET JOB
-                // Request max 1GB job for web node stability
-                const res = await fetch('/get_job?max_size_mb=1024');
+                // Request max 512MB job for web node stability (reduced from 1024)
+                const res = await fetch('/get_job?max_size_mb=512');
                 const data = await res.json();
 
                 if (data.status === 'empty') {
@@ -302,9 +302,8 @@
         const workDir = "/tmp/work_" + Date.now();
         const inputName = "input.mp4";
         const outputName = "output.mp4";
-        const inputPath = `${workDir}/${inputName}`;
-        const outputPath = `${workDir}/${outputName}`;
-
+        // Relative paths for callMain after chdir
+        
         // Resolve Emscripten Exports (Module.FS or global FS)
         const FS = Module.FS || window.FS;
         const callMain = Module.callMain || window.callMain;
@@ -318,7 +317,7 @@
             const contentLength = dl.headers.get('content-length');
             if (contentLength) {
                 const sizeMB = parseInt(contentLength) / (1024 * 1024);
-                if (sizeMB > 1024) { // 1GB Limit
+                if (sizeMB > 1024) { // Absolute 1GB Hard Limit
                     throw new Error(`File too large for Web Node (${sizeMB.toFixed(2)} MB). Limit is 1GB.`);
                 }
             }
@@ -336,14 +335,18 @@
                 if (e.code !== 'EEXIST') log(`Mkdir error: ${e.message}`, 'err');
             }
 
-            log(`Writing ${data.length} bytes to Virtual FS: ${inputPath}`, 'sys');
-            FS.writeFile(inputPath, data);
+            // Write absolute path
+            const inputAbsPath = `${workDir}/${inputName}`;
+            log(`Writing ${data.length} bytes to Virtual FS: ${inputAbsPath}`, 'sys');
+            FS.writeFile(inputAbsPath, data);
             
             // [DEBUG] Verify FS state
             try {
-                log(`CWD: ${FS.cwd()}`, 'sys');
-                log(`Dir listing: ${FS.readdir(workDir).join(', ')}`, 'sys');
-                const stat = FS.stat(inputPath);
+                // Change Directory to workDir so FFmpeg sees local files
+                FS.chdir(workDir);
+                log(`CWD changed to: ${FS.cwd()}`, 'sys');
+                log(`Dir listing: ${FS.readdir('.').join(', ')}`, 'sys');
+                const stat = FS.stat(inputName); // check relative
                 log(`File stat: size=${stat.size}, mode=${stat.mode}`, 'sys');
             } catch(e) {
                 log(`FS Verification Error: ${e.message}`, 'err');
@@ -360,9 +363,9 @@
                 const startTime = Date.now();
                 
                 try {
-                    // Note: We use the absolute path for input and output
+                    // Use RELATIVE paths now that we are in the dir
                     callMain([
-                        '-i', inputPath,
+                        '-i', inputName,
                         '-c:v', 'libsvtav1',
                         '-preset', '8',
                         '-crf', '35',
@@ -372,7 +375,7 @@
                         '-c:a', 'libopus',
                         '-b:a', '128k',
                         '-ac', '1',
-                        outputPath
+                        outputName
                     ]);
                 } catch (err) {
                     log("FFmpeg Crashed: " + err, 'err');
@@ -386,12 +389,12 @@
 
             // E. READ OUTPUT
             log("Reading output file...", 'sys');
-            // Check if output exists
-            if (!FS.analyzePath(outputPath).exists) {
+            // Check if output exists (relative)
+            if (!FS.analyzePath(outputName).exists) {
                 throw new Error("Output file was not created by FFmpeg.");
             }
             
-            const outData = FS.readFile(outputPath);
+            const outData = FS.readFile(outputName);
             const blob = new Blob([outData], { type: 'video/mp4' });
 
             // F. UPLOAD
@@ -412,12 +415,16 @@
             // G. CLEANUP FS
             try {
                 if (FS) {
-                    // Try to clean up the specific directory
+                    // Switch back to root
+                    FS.chdir('/');
+                    
+                    // Cleanup dir
                     if (workDir) {
-                         // Recursive delete is not standard in simple FS implementations, 
-                         // so we delete files then dir.
-                         if (FS.analyzePath(inputPath).exists) FS.unlink(inputPath);
-                         if (FS.analyzePath(outputPath).exists) FS.unlink(outputPath);
+                         const inputAbs = `${workDir}/${inputName}`;
+                         const outputAbs = `${workDir}/${outputName}`;
+                         
+                         if (FS.analyzePath(inputAbs).exists) FS.unlink(inputAbs);
+                         if (FS.analyzePath(outputAbs).exists) FS.unlink(outputAbs);
                          try { FS.rmdir(workDir); } catch(e) {}
                     }
                 }
