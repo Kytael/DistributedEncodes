@@ -130,12 +130,6 @@ async function processJob(job) {
             self.rejectJob = reject;
         });
 
-        // FORCE MAIN THREAD EXECUTION
-        // Bypass Emscripten's pthread proxying to ensure FFmpeg sees the local MEMFS
-        if (Module["_main"] && Module["__emscripten_proxy_main"]) {
-            Module["__emscripten_proxy_main"] = Module["_main"];
-        }
-
         // callMain might return immediately if proxied, or block. 
         // We await our custom promise which is triggered by Module.quit
         callMain(args);
