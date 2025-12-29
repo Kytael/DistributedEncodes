@@ -35,7 +35,7 @@ self.Module = {
 };
 
 // Load FFmpeg WASM
-importScripts('ffmpeg.js');
+importScripts('ffmpeg.js?v=' + Date.now());
 
 // Capture Emscripten's message handler (if any) to preserve Pthread communication
 const emscriptenOnMessage = self.onmessage;
