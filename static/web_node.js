@@ -18,6 +18,8 @@ self.Module = {
     // CRITICAL: Point Pthreads to the actual Emscripten JS file, NOT this worker wrapper.
     // Otherwise, Pthreads import web_node.js -> import ffmpeg.js -> infinite loop or broken context.
     mainScriptUrlOrBlob: basePath + "/ffmpeg.js",
+    noInitialRun: true,
+    noExitRuntime: true,
 };
 
 // Load FFmpeg WASM
@@ -83,7 +85,6 @@ async function processJob(job) {
         
         // SVT-AV1 Arguments
         const args = [
-            'ffmpeg',
             '-threads', '1', 
             '-v', 'verbose',
             '-i', inputPath,
