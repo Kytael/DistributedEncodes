@@ -19,7 +19,18 @@ self.Module = {
     // Otherwise, Pthreads import web_node.js -> import ffmpeg.js -> infinite loop or broken context.
     mainScriptUrlOrBlob: basePath + "/ffmpeg.js",
     noInitialRun: true,
-    noExitRuntime: true,
+    // We handle exit manually to detect job completion
+    quit: function(status, toThrow) {
+        postMessage({type: 'log', level: 'sys', msg: `FFmpeg exit with status ${status}`});
+        if (self.resolveJob) {
+            if (status === 0) self.resolveJob();
+            else self.rejectJob(new Error(`FFmpeg exited with status ${status}`));
+            self.resolveJob = null;
+            self.rejectJob = null;
+        }
+        // Emscripten expects quit to throw to stop execution
+        if (toThrow) throw toThrow;
+    },
 };
 
 // Load FFmpeg WASM
@@ -112,8 +123,17 @@ async function processJob(job) {
             outputPath
         ];
 
-        // callMain is synchronous in this build
+        // Wrap execution in a promise to wait for completion
+        const ffmpegPromise = new Promise((resolve, reject) => {
+            self.resolveJob = resolve;
+            self.rejectJob = reject;
+        });
+
+        // callMain might return immediately if proxied, or block. 
+        // We await our custom promise which is triggered by Module.quit
         callMain(args);
+        
+        await ffmpegPromise;
 
         // 4. Read Output
         postMessage({type: 'log', level: 'sys', msg: "Reading output..."});
@@ -126,6 +146,10 @@ async function processJob(job) {
         } catch(e) { exists = false; }
 
         if (!exists) {
+            // Debug: List /tmp to see what happened
+            try {
+                postMessage({type: 'log', level: 'err', msg: `/tmp content: ${JSON.stringify(FS.readdir('/tmp'))}`});
+            } catch(e){}
             throw new Error("FFmpeg did not create output file (check logs for errors).");
         }
         
