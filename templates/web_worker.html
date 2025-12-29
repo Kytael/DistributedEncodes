@@ -298,8 +298,9 @@
         const jobId = job.id;
         log(`STARTING JOB: ${job.filename} (${jobId})`, 'sys');
         
-        const inputName = "input_" + Date.now(); 
-        const outputName = "output.mp4";
+        // Use absolute paths in the virtual FS
+        const inputName = "/input_" + Date.now() + ".mp4"; // Assume mp4/mkv, ffmpeg detects content
+        const outputName = "/output.mp4";
 
         // Resolve Emscripten Exports (Module.FS or global FS)
         const FS = Module.FS || window.FS;
@@ -327,11 +328,19 @@
             
             log(`Writing ${data.length} bytes to Virtual FS: ${inputName}`, 'sys');
             FS.writeFile(inputName, data);
+            
+            // [DEBUG] Verify FS state
+            try {
+                log(`CWD: ${FS.cwd()}`, 'sys');
+                log(`Root listing: ${FS.readdir('/').join(', ')}`, 'sys');
+                const stat = FS.stat(inputName);
+                log(`File stat: size=${stat.size}, mode=${stat.mode}`, 'sys');
+            } catch(e) {
+                log(`FS Verification Error: ${e.message}`, 'err');
+            }
 
             // [MEMORY] Free JS memory immediately
             data = null; 
-            // Note: 'buf' is const but we lose reference to the wrapper 'data'. 
-            // To be thorough, we can't null 'buf' if it's const, so we rely on 'data = null' and scope exit.
 
             // D. EXECUTE (Synchronous callMain)
             log("EXECUTE: callMain(). Browser will FREEZE now...", 'err');
@@ -341,6 +350,7 @@
                 const startTime = Date.now();
                 
                 try {
+                    // Note: We use the absolute path for input and output
                     callMain([
                         '-i', inputName,
                         '-c:v', 'libsvtav1',
@@ -366,6 +376,11 @@
 
             // E. READ OUTPUT
             log("Reading output file...", 'sys');
+            // Check if output exists
+            if (!FS.analyzePath(outputName).exists) {
+                throw new Error("Output file was not created by FFmpeg.");
+            }
+            
             const outData = FS.readFile(outputName);
             const blob = new Blob([outData], { type: 'video/mp4' });
 
@@ -386,8 +401,10 @@
         } finally {
             // G. CLEANUP FS
             try {
-                if (FS && FS.analyzePath(inputName).exists) FS.unlink(inputName);
-                if (FS && FS.analyzePath(outputName).exists) FS.unlink(outputName);
+                if (FS) {
+                    if (FS.analyzePath(inputName).exists) FS.unlink(inputName);
+                    if (FS.analyzePath(outputName).exists) FS.unlink(outputName);
+                }
                 log("Cleanup done.", 'sys');
             } catch(e) { console.error(e); }
         }
