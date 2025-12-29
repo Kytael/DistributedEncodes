@@ -83,6 +83,7 @@ async function processJob(job) {
         
         // SVT-AV1 Arguments
         const args = [
+            'ffmpeg',
             '-threads', '1', 
             '-v', 'verbose',
             '-i', inputPath,
