@@ -11,6 +11,7 @@ from datetime import datetime
 from urllib.parse import quote
 from flask import Flask, request, jsonify, render_template, send_from_directory, send_file, Response
 import shutil
+import traceback
 
 # ==============================================================================
 # CONFIGURATION
@@ -103,17 +104,27 @@ def log_event(level, message, related_id=None):
     except Exception as e:
         print(f"[!] Logging failed: {e}")
 
+# [IMPROVED] Better error capturing
 def verify_upload(filepath):
     """Verifies that the uploaded file matches the strict encoding rules."""
     try:
         cmd = [
-            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            'ffprobe', '-v', 'error', '-print_format', 'json', 
             '-show_streams', '-show_format', filepath
         ]
+        # Capture stderr to see why it failed
         result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0: return False, "FFprobe failed"
         
-        data = json.loads(result.stdout)
+        if result.returncode != 0: 
+            # Return the actual error from FFprobe (last 200 chars)
+            error_msg = result.stderr.strip()[-200:] if result.stderr else "Unknown error (Exit Code != 0)"
+            return False, f"FFprobe Error: {error_msg}"
+        
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return False, "FFprobe returned invalid JSON"
+
         has_video = False
         
         for stream in data.get('streams', []):
@@ -132,6 +143,8 @@ def verify_upload(filepath):
         
         if not has_video: return False, "No Video Stream Found"
         return True, "Verified"
+    except FileNotFoundError:
+        return False, "FFprobe not installed on server"
     except Exception as e:
         return False, f"Verification Exception: {str(e)}"
 
@@ -141,22 +154,30 @@ def scan_and_queue():
     conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
     
     # 1. Add new files
+    count_new = 0
     for root, dirs, files in os.walk(SOURCE_DIRECTORY, topdown=True):
         dirs.sort(); files.sort()
         for file in files:
             if file.lower().endswith(VIDEO_EXTENSIONS):
                 full_path = os.path.join(root, file)
                 rel_path = os.path.relpath(full_path, SOURCE_DIRECTORY)
-                cursor.execute("INSERT OR IGNORE INTO jobs (id, filename, status, last_updated) VALUES (?, ?, 'queued', ?)", (rel_path, file, datetime.now()))
+                cursor.execute("SELECT id FROM jobs WHERE id=?", (rel_path,))
+                if not cursor.fetchone():
+                    cursor.execute("INSERT INTO jobs (id, filename, status, last_updated) VALUES (?, ?, 'queued', ?)", (rel_path, file, datetime.now()))
+                    count_new += 1
     conn.commit()
+    if count_new > 0:
+        log_event("INFO", f"Scanner found {count_new} new files.")
 
     # 2. Load queue
     print("[*] Loading queue from database...")
     cursor.execute("SELECT id, filename FROM jobs WHERE status = 'queued'")
+    loaded_count = 0
     for row in cursor.fetchall():
         if row[0] not in queued_job_ids:
             job_queue.put({"id": row[0], "filename": row[1], "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(row[0], safe='/')}"})
             queued_job_ids.add(row[0])
+            loaded_count += 1
     conn.close()
     print(f"[*] Queue ready. {job_queue.qsize()} jobs waiting.")
 
@@ -214,7 +235,7 @@ def get_job():
             job = job_queue.get_nowait()
             queued_job_ids.discard(job['id'])
             
-            # Mark as processing immediately so no one else gets it
+            # Mark as processing
             conn = sqlite3.connect(DB_FILE)
             conn.execute("UPDATE jobs SET status='processing', last_updated=?, started_at=? WHERE id=?", (datetime.now(), datetime.now(), job['id']))
             conn.commit(); conn.close()
@@ -250,7 +271,9 @@ def upload_result():
         is_valid, reason = verify_upload(save_path)
         if not is_valid:
             log_event("ERROR", f"Verification Failed: {reason}", job_id)
-            os.remove(save_path) # Delete bad file
+            try: os.remove(save_path) 
+            except: pass
+            
             # Mark as failed in DB
             with db_lock:
                 conn = sqlite3.connect(DB_FILE)
@@ -280,6 +303,10 @@ def report_status():
     # Security: Prevent workers from marking jobs as completed directly
     if status == 'completed':
         return jsonify({"status": "ignored", "message": "Cannot set completion status manually"}), 403
+    
+    # [NEW] Log failures reported by workers
+    if status == 'failed':
+        log_event("ERROR", f"Worker {d.get('worker_id')} reported failure on job", d.get('job_id'))
 
     with db_lock:
         conn = sqlite3.connect(DB_FILE)
@@ -331,7 +358,7 @@ def api_all_jobs():
 @app.route('/api/logs')
 @requires_auth
 def get_logs():
-    limit = request.args.get('limit', 50)
+    limit = request.args.get('limit', 100)
     with db_lock:
         conn = sqlite3.connect(DB_FILE)
         conn.row_factory = sqlite3.Row
@@ -345,6 +372,9 @@ def get_logs():
 @requires_auth
 def admin_action():
     data = request.json; job_id = data.get('job_id'); action = data.get('action')
+    # [NEW] Log admin actions
+    log_event("WARN", f"Admin performed '{action}' on job", job_id)
+    
     with db_lock:
         conn = sqlite3.connect(DB_FILE); c = conn.cursor()
         if action == 'delete':
@@ -358,6 +388,16 @@ def admin_action():
                  queued_job_ids.add(job_id)
         conn.commit(); conn.close()
     return jsonify({"status": "ok"})
+
+# [NEW] Global Exception Handler
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # Pass through HTTP errors
+    if isinstance(e,  Response): return e
+    
+    # Log the error
+    log_event("CRITICAL", f"Unhandled Exception: {str(e)}\n{traceback.format_exc()}")
+    return "Internal Server Error", 500
 
 def maintenance_loop():
     """Background thread to reset stuck jobs."""
