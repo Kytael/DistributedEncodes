@@ -165,6 +165,7 @@
         var isFFmpegReady = false;
 
         var Module = {
+            noInitialRun: true,
             print: function(text) { log("STDOUT: " + text, 'sys'); },
             printErr: function(text) { log("STDERR: " + text, 'err'); },
             onRuntimeInitialized: function() {
