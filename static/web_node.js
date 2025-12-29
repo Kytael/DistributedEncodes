@@ -19,6 +19,7 @@ self.Module = {
     // Otherwise, Pthreads import web_node.js -> import ffmpeg.js -> infinite loop or broken context.
     mainScriptUrlOrBlob: basePath + "/ffmpeg.js",
     noInitialRun: true,
+    noExitRuntime: true,
     // We handle exit manually to detect job completion
     quit: function(status, toThrow) {
         postMessage({type: 'log', level: 'sys', msg: `FFmpeg exit with status ${status}`});
@@ -128,6 +129,12 @@ async function processJob(job) {
             self.resolveJob = resolve;
             self.rejectJob = reject;
         });
+
+        // FORCE MAIN THREAD EXECUTION
+        // Bypass Emscripten's pthread proxying to ensure FFmpeg sees the local MEMFS
+        if (Module["_main"] && Module["__emscripten_proxy_main"]) {
+            Module["__emscripten_proxy_main"] = Module["_main"];
+        }
 
         // callMain might return immediately if proxied, or block. 
         // We await our custom promise which is triggered by Module.quit
