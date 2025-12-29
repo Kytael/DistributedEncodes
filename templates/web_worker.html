@@ -3,71 +3,230 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Raw Emscripten Worker</title>
+    <title>FRACTUM :: WEB NODE</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <script src="/static/ffmpeg.js"></script>
     <style>
-        body { font-family: monospace; background: #111; color: #ccc; padding: 20px; max-width: 900px; margin: 0 auto; }
-        .card { background: #222; padding: 20px; border: 1px solid #333; margin-bottom: 20px; }
-        h1 { color: #fff; border-bottom: 1px solid #444; padding-bottom: 10px; }
-        .log-box { 
-            background: #000; color: #0f0; border: 1px solid #444; 
-            height: 400px; overflow-y: scroll; padding: 10px; white-space: pre-wrap; font-size: 12px; 
+        :root {
+            --bg-dark: #000000;
+            --bg-panel: #0a0a0a;
+            --neon-purple: #cc00ff;
+            --neon-pink: #ff00aa;
+            --neon-green: #00ff41;
+            --neon-red: #ff3333;
+            --text-light: #e0e0e0;
+            --text-dim: #888888;
+            --font: 'Roboto Mono', monospace;
         }
-        button { 
-            padding: 10px 20px; font-weight: bold; cursor: pointer; border: none; font-family: monospace;
+        *, *::before, *::after { box-sizing: border-box; }
+        
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            font-family: var(--font);
+            padding: 20px;
+            margin: 0;
+            background-image: 
+                linear-gradient(to right, rgba(204,0,255,0.05) 1px, transparent 1px),
+                linear-gradient(to bottom, rgba(204,0,255,0.05) 1px, transparent 1px);
+            background-size: 25px 25px;
         }
-        .btn-start { background: #007bff; color: white; }
-        .btn-start:hover { background: #0056b3; }
-        .btn-stop { background: #dc3545; color: white; display: none; }
-        input { background: #333; border: 1px solid #555; color: white; padding: 5px; font-family: monospace; }
+
+        .dashboard-container {
+            max-width: 1200px;
+            width: 100%;
+            margin: 0 auto;
+            border: 2px solid var(--neon-purple);
+            background-color: rgba(10, 10, 10, 0.9);
+            box-shadow: 0 0 15px var(--neon-purple), inset 0 0 10px rgba(204,0,255,0.2);
+            padding: 25px;
+            border-radius: 5px;
+        }
+
+        /* Header */
+        .header-container { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 30px; 
+            border-bottom: 1px dashed var(--neon-purple);
+            padding-bottom: 15px; 
+        }
+        .header-title-group { display: flex; flex-direction: column; }
+        .back-link {
+            color: var(--text-dim);
+            text-decoration: none;
+            font-size: 0.8em;
+            margin-bottom: 5px;
+            transition: color 0.2s;
+        }
+        .back-link:hover { color: var(--neon-pink); text-shadow: 0 0 5px var(--neon-pink); }
+        
+        h1 { 
+            color: var(--neon-green); 
+            text-transform: uppercase; 
+            letter-spacing: 2px; 
+            text-shadow: 0 0 8px var(--neon-green); 
+            margin: 0; 
+            font-size: 1.8em;
+        }
+
+        /* Card & Controls */
+        .card { 
+            background: rgba(0,0,0,0.3); 
+            border: 1px solid var(--neon-purple); 
+            padding: 20px; 
+            box-shadow: 0 0 8px rgba(204,0,255,0.2);
+            margin-bottom: 25px;
+        }
+        .card-header {
+            border-bottom: 1px dashed var(--neon-purple);
+            padding-bottom: 10px;
+            margin-bottom: 15px;
+            color: var(--neon-purple);
+            font-weight: bold;
+            font-size: 1.1em;
+            text-transform: uppercase;
+        }
+
+        /* Inputs & Buttons */
+        label { color: var(--text-dim); margin-right: 10px; }
+        input[type="text"] {
+            background: rgba(0,0,0,0.5);
+            border: 1px solid var(--neon-purple);
+            color: var(--text-light);
+            padding: 8px 12px;
+            font-family: var(--font);
+            width: 350px;
+            font-size: 1em;
+        }
+        input[type="text"]:focus {
+            outline: none;
+            border-color: var(--neon-green);
+            box-shadow: 0 0 8px var(--neon-green);
+        }
+
+        .btn-control {
+            background: transparent;
+            border: 2px solid var(--neon-green);
+            color: var(--neon-green);
+            padding: 10px 25px;
+            font-family: var(--font);
+            font-weight: bold;
+            cursor: pointer;
+            text-transform: uppercase;
+            transition: all 0.2s;
+            margin-right: 10px;
+            font-size: 1em;
+            box-shadow: 0 0 5px var(--neon-green);
+        }
+        .btn-control:hover {
+            background: var(--neon-green);
+            color: black;
+            box-shadow: 0 0 20px var(--neon-green);
+        }
+        .btn-stop {
+            border-color: var(--neon-red);
+            color: var(--neon-red);
+            box-shadow: 0 0 5px var(--neon-red);
+            display: none; /* Hidden by default */
+        }
+        .btn-stop:hover {
+            background: var(--neon-red);
+            color: white;
+            box-shadow: 0 0 20px var(--neon-red);
+        }
+
+        /* Log Box */
+        .log-box {
+            background: #000; 
+            color: var(--text-light); 
+            border: 1px solid var(--text-dim); 
+            height: 400px; 
+            overflow-y: scroll; 
+            padding: 15px; 
+            white-space: pre-wrap; 
+            font-size: 12px; 
+            box-shadow: inset 0 0 15px rgba(0,0,0,0.9);
+            font-family: 'Consolas', 'Monaco', monospace;
+        }
+        .log-time { color: var(--text-dim); }
+        .log-sys { color: var(--neon-purple); }
+        .log-err { color: var(--neon-red); }
+        .log-succ { color: var(--neon-green); }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #111; }
+        ::-webkit-scrollbar-thumb { background: #333; border: 1px solid #555; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--neon-purple); }
     </style>
 
     <script>
-        // --- 1. CONFIGURE RAW EMSCRIPTEN MODULE ---
         var isFFmpegReady = false;
 
         var Module = {
-            // Redirect stdout/stderr to our HTML log
-            print: function(text) { log("STDOUT: " + text); },
-            printErr: function(text) { log("STDERR: " + text); },
-            
-            // Callback when WASM is compiled and memory is ready
+            print: function(text) { log("STDOUT: " + text, 'sys'); },
+            printErr: function(text) { log("STDERR: " + text, 'err'); },
             onRuntimeInitialized: function() {
                 isFFmpegReady = true;
-                log("✅ SYSTEM: FFmpeg WASM Runtime Initialized.");
-                log("ℹ️  NOTE: Encoding runs on the main thread. Browser may freeze during 'callMain'.");
+                log("SYSTEM: FFmpeg WASM Runtime Initialized.", 'succ');
+                log("NOTE: Encoding runs on the main thread. Browser may freeze during 'callMain'.", 'sys');
             }
         };
 
-        // UI Logger
-        function log(msg) {
+        function log(msg, type='normal') {
             const box = document.getElementById('log');
             if (box) {
                 const time = new Date().toLocaleTimeString();
-                box.innerHTML += `[${time}] ${msg}\n`;
+                let colorClass = '';
+                if(type === 'sys') colorClass = 'log-sys';
+                if(type === 'err') colorClass = 'log-err';
+                if(type === 'succ') colorClass = 'log-succ';
+                
+                const span = `<span class="log-time">[${time}]</span> <span class="${colorClass}">${msg}</span>`;
+                box.innerHTML += span + "\n";
                 box.scrollTop = box.scrollHeight;
             }
             console.log(msg);
         }
     </script>
-
-    <script src="/static/ffmpeg.js"></script>
 </head>
 <body>
 
-    <h1>🛠️ Custom Raw FFmpeg Worker</h1>
+    <div class="dashboard-container">
+        <div class="header-container">
+            <div class="header-title-group">
+                <a href="/dashboard" class="back-link">&lt;&lt; BACK TO DASHBOARD</a>
+                <h1>// BROWSER_NODE_CONTROLLER</h1>
+            </div>
+        </div>
 
-    <div class="card">
-        <label>Worker Name: <input type="text" id="workerName" value="RawWasmNode"></label>
-        <br><br>
-        <button id="btnStart" class="btn-start" onclick="startLoop()">Start Processing</button>
-        <button id="btnStop" class="btn-stop" onclick="stopLoop()">Stop</button>
-    </div>
+        <div class="card">
+            <div class="card-header">>> CONFIGURATION</div>
+            <div style="margin-bottom: 20px;">
+                <label>WORKER_ID:</label>
+                <input type="text" id="workerName" value="">
+            </div>
+            <div>
+                <button id="btnStart" class="btn-control" onclick="startLoop()">[ EXECUTE ]</button>
+                <button id="btnStop" class="btn-control btn-stop" onclick="stopLoop()">[ TERMINATE ]</button>
+            </div>
+        </div>
 
-    <div class="card">
-        <div id="log" class="log-box">Waiting for Module to initialize...</div>
+        <div class="card">
+            <div class="card-header">>> CONSOLE_OUTPUT</div>
+            <div id="log" class="log-box">Initializing WASM Core...</div>
+        </div>
     </div>
 
 <script>
+    // Set default name: Anonymous-WebNode-{timestamp}-1
+    document.addEventListener("DOMContentLoaded", () => {
+        const ts = Math.floor(Date.now() / 1000);
+        document.getElementById('workerName').value = `Anonymous-WebNode-${ts}-1`;
+    });
+
     let isRunning = false;
 
     async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -79,7 +238,7 @@
 
     function stopLoop() {
         isRunning = false;
-        log("🛑 STOP command received. Finishing current job...");
+        log("STOP command received. Finishing current job...", 'err');
     }
 
     async function startLoop() {
@@ -91,16 +250,17 @@
         isRunning = true;
         toggleButtons(true);
         const workerName = document.getElementById('workerName').value;
+        log(`Worker [${workerName}] Started. Polling for jobs...`, 'succ');
 
         while (isRunning) {
             try {
                 // A. GET JOB
-                log("🔄 Checking for jobs...");
+                // log("Checking for jobs...", 'sys'); // verbose
                 const res = await fetch('/get_job');
                 const data = await res.json();
 
                 if (data.status === 'empty') {
-                    log("💤 Queue empty. Waiting 10s...");
+                    // log("Queue empty. Waiting 10s...", 'sys'); // verbose
                     await sleep(10000);
                     continue;
                 }
@@ -110,43 +270,41 @@
                 }
 
             } catch (e) {
-                log("❌ ERROR: " + e.message);
+                log("ERROR: " + e.message, 'err');
                 await sleep(5000);
             }
         }
 
         toggleButtons(false);
-        log("⏹️ Worker Stopped.");
+        log("Worker Stopped.", 'err');
     }
 
     async function processJob(job, workerName) {
         const jobId = job.id;
-        log(`🎬 STARTING JOB: ${job.filename} (${jobId})`);
+        log(`STARTING JOB: ${job.filename} (${jobId})`, 'sys');
         
-        const inputName = "input_" + Date.now(); // Simple names for WASM FS
+        const inputName = "input_" + Date.now(); 
         const outputName = "output.mp4";
 
         try {
             // B. DOWNLOAD
-            log("⬇️ Downloading source...");
+            log("Downloading source...", 'sys');
             const dl = await fetch(job.download_url);
             const buf = await dl.arrayBuffer();
             const data = new Uint8Array(buf);
             
             // C. WRITE TO VIRTUAL FS
-            log(`💾 Writing ${data.length} bytes to Virtual FS: ${inputName}`);
+            log(`Writing ${data.length} bytes to Virtual FS: ${inputName}`, 'sys');
             Module.FS.writeFile(inputName, data);
 
             // D. EXECUTE (Synchronous callMain)
-            log("⚙️  EXECUTE: callMain(). Browser will FREEZE now...");
+            log("EXECUTE: callMain(). Browser will FREEZE now...", 'err');
             
             // Use setTimeout to allow the DOM to update the "Freeze" warning before we block the thread
             await new Promise(resolve => setTimeout(() => {
                 const startTime = Date.now();
                 
                 try {
-                    // *** RAW EMSCRIPTEN API CALL ***
-                    // Equivalent to: ffmpeg -i input -c:v libsvtav1 ... output.mp4
                     Module.callMain([
                         '-i', inputName,
                         '-c:v', 'libsvtav1',
@@ -161,42 +319,40 @@
                         outputName
                     ]);
                 } catch (err) {
-                    log("❌ FFmpeg Crashed: " + err);
+                    log("FFmpeg Crashed: " + err, 'err');
                     throw err;
                 }
 
                 const duration = (Date.now() - startTime) / 1000;
-                log(`✅ Transcoding Finished in ${duration.toFixed(1)}s`);
+                log(`Transcoding Finished in ${duration.toFixed(1)}s`, 'succ');
                 resolve(duration);
-            }, 50)); // Small delay to render UI
+            }, 50)); 
 
             // E. READ OUTPUT
-            log("📂 Reading output file...");
+            log("Reading output file...", 'sys');
             const outData = Module.FS.readFile(outputName);
             const blob = new Blob([outData], { type: 'video/mp4' });
 
             // F. UPLOAD
-            log(`⬆️  Uploading ${outData.length} bytes...`);
+            log(`Uploading ${outData.length} bytes...`, 'sys');
             const formData = new FormData();
             formData.append('job_id', jobId);
-            formData.append('worker_id', workerName + " (RawWASM)");
+            formData.append('worker_id', workerName);
             formData.append('file', blob, 'result.mp4');
-            // We can't easily track duration in sync mode unless we diff Date.now(), which we did above
-            // formData.append('duration', duration); 
 
             const up = await fetch('/upload_result', { method: 'POST', body: formData });
             
-            if (up.ok) log("🎉 Upload Success!");
-            else log("⚠️ Upload Failed: " + up.statusText);
+            if (up.ok) log("Upload Success!", 'succ');
+            else log("Upload Failed: " + up.statusText, 'err');
 
         } catch (e) {
-            log("❌ JOB FAILED: " + e);
+            log("JOB FAILED: " + e, 'err');
         } finally {
             // G. CLEANUP FS
             try {
                 if (Module.FS.analyzePath(inputName).exists) Module.FS.unlink(inputName);
                 if (Module.FS.analyzePath(outputName).exists) Module.FS.unlink(outputName);
-                log("🧹 Cleanup done.");
+                log("Cleanup done.", 'sys');
             } catch(e) { console.error(e); }
         }
     }

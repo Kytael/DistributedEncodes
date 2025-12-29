@@ -266,6 +266,15 @@
             <div class="modal-content">
                 <p>Contribute your computing power to the network. Choose your deployment method below.</p>
                 
+                <div class="os-section" style="border-left-color: var(--neon-green);">
+                    <span class="os-title" style="color: var(--neon-green);">:: WEB BROWSER (INSTANT)</span>
+                    <p style="margin: 5px 0 10px 0; color: #ccc;">
+                        Run a worker directly in this tab. No installation required.<br>
+                        <em style="color: var(--text-dim); font-size: 0.9em;">(Note: Slower than native app due to browser limits. Single-threaded.)</em>
+                    </p>
+                    <a href="/web_worker" class="modal-btn web-node-btn" style="display:inline-block; margin-top:5px; text-decoration:none;">LAUNCH WEB NODE</a>
+                </div>
+
                 <div class="os-section">
                     <span class="os-title">:: LINUX (ONE-LINER)</span>
                     Run this command to auto-install and join (Requires Curl & Sudo):
