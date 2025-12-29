@@ -45,7 +45,7 @@ except ImportError:
 app = Flask(__name__)
 job_queue = queue.Queue()
 queued_job_ids = set() # Track IDs in queue to prevent duplicates
-db_lock = threading.Lock()
+db_lock = threading.RLock()
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024 
 
 # --- SECURITY HELPERS ---
