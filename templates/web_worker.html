@@ -298,9 +298,12 @@
         const jobId = job.id;
         log(`STARTING JOB: ${job.filename} (${jobId})`, 'sys');
         
-        // Use absolute paths in the virtual FS
-        const inputName = "/input_" + Date.now() + ".mp4"; // Assume mp4/mkv, ffmpeg detects content
-        const outputName = "/output.mp4";
+        // Use a subdirectory to avoid root path issues
+        const workDir = "/tmp/work_" + Date.now();
+        const inputName = "input.mp4";
+        const outputName = "output.mp4";
+        const inputPath = `${workDir}/${inputName}`;
+        const outputPath = `${workDir}/${outputName}`;
 
         // Resolve Emscripten Exports (Module.FS or global FS)
         const FS = Module.FS || window.FS;
@@ -326,14 +329,21 @@
             // C. WRITE TO VIRTUAL FS
             if (!FS) throw new Error("FFmpeg FileSystem (FS) not initialized. WASM may have failed to load.");
             
-            log(`Writing ${data.length} bytes to Virtual FS: ${inputName}`, 'sys');
-            FS.writeFile(inputName, data);
+            // Create working directory
+            try {
+                FS.mkdir(workDir);
+            } catch(e) {
+                if (e.code !== 'EEXIST') log(`Mkdir error: ${e.message}`, 'err');
+            }
+
+            log(`Writing ${data.length} bytes to Virtual FS: ${inputPath}`, 'sys');
+            FS.writeFile(inputPath, data);
             
             // [DEBUG] Verify FS state
             try {
                 log(`CWD: ${FS.cwd()}`, 'sys');
-                log(`Root listing: ${FS.readdir('/').join(', ')}`, 'sys');
-                const stat = FS.stat(inputName);
+                log(`Dir listing: ${FS.readdir(workDir).join(', ')}`, 'sys');
+                const stat = FS.stat(inputPath);
                 log(`File stat: size=${stat.size}, mode=${stat.mode}`, 'sys');
             } catch(e) {
                 log(`FS Verification Error: ${e.message}`, 'err');
@@ -352,7 +362,7 @@
                 try {
                     // Note: We use the absolute path for input and output
                     callMain([
-                        '-i', inputName,
+                        '-i', inputPath,
                         '-c:v', 'libsvtav1',
                         '-preset', '8',
                         '-crf', '35',
@@ -362,7 +372,7 @@
                         '-c:a', 'libopus',
                         '-b:a', '128k',
                         '-ac', '1',
-                        outputName
+                        outputPath
                     ]);
                 } catch (err) {
                     log("FFmpeg Crashed: " + err, 'err');
@@ -377,11 +387,11 @@
             // E. READ OUTPUT
             log("Reading output file...", 'sys');
             // Check if output exists
-            if (!FS.analyzePath(outputName).exists) {
+            if (!FS.analyzePath(outputPath).exists) {
                 throw new Error("Output file was not created by FFmpeg.");
             }
             
-            const outData = FS.readFile(outputName);
+            const outData = FS.readFile(outputPath);
             const blob = new Blob([outData], { type: 'video/mp4' });
 
             // F. UPLOAD
@@ -402,8 +412,14 @@
             // G. CLEANUP FS
             try {
                 if (FS) {
-                    if (FS.analyzePath(inputName).exists) FS.unlink(inputName);
-                    if (FS.analyzePath(outputName).exists) FS.unlink(outputName);
+                    // Try to clean up the specific directory
+                    if (workDir) {
+                         // Recursive delete is not standard in simple FS implementations, 
+                         // so we delete files then dir.
+                         if (FS.analyzePath(inputPath).exists) FS.unlink(inputPath);
+                         if (FS.analyzePath(outputPath).exists) FS.unlink(outputPath);
+                         try { FS.rmdir(workDir); } catch(e) {}
+                    }
                 }
                 log("Cleanup done.", 'sys');
             } catch(e) { console.error(e); }
