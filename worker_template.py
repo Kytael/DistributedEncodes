@@ -22,7 +22,7 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.0.9" # Bumped version for Terminal/Signal Fixes
+WORKER_VERSION = "1.1.0" # Bumped version for Critical Input Fixes
 
 # --- UPDATE COORDINATION ---
 SHUTDOWN_EVENT = threading.Event()
@@ -62,16 +62,11 @@ ENCODING_CONFIG = {
 # ==============================================================================
 
 def get_term_width():
-    """Returns terminal width, defaulting to 80 if undetectable."""
-    try:
-        return shutil.get_terminal_size((80, 20)).columns
-    except:
-        return 80
+    try: return shutil.get_terminal_size((80, 20)).columns
+    except: return 80
 
 def safe_print(message):
-    """Thread-safe print that clears the line using ANSI codes to prevent wrapping artifacts."""
     with CONSOLE_LOCK:
-        # \033[2K clears the entire line, \r returns to start
         sys.stdout.write('\033[2K\r')
         print(message)
         sys.stdout.flush()
@@ -83,10 +78,11 @@ def log(worker_id, message, level="INFO"):
 def signal_handler(sig, frame):
     """Catches Ctrl+C and sets a flag instead of crashing."""
     global PAUSE_REQUESTED
-    # Only trigger if not already paused to avoid spamming
     if not PAUSE_REQUESTED:
         PAUSE_REQUESTED = True
-        sys.stdout.write('\n\033[2K\r[!] PAUSE REQUESTED. Please wait for menu...\n')
+        # We write directly to stdout to avoid lock deadlocks during signal handling
+        sys.stdout.write('\n\n[!] PAUSE REQUESTED. Please wait...\n')
+        sys.stdout.flush()
 
 def suspend_windows_process(pid):
     try:
@@ -113,7 +109,6 @@ def resume_windows_process(pid):
     return False
 
 def toggle_processes(suspend=True):
-    """Pauses or Resumes all active FFmpeg subprocesses."""
     with PROC_LOCK:
         for wid, proc in ACTIVE_PROCS.items():
             if proc.poll() is None:
@@ -131,8 +126,6 @@ def kill_processes():
         for wid, proc in ACTIVE_PROCS.items():
             try:
                 if proc.poll() is None:
-                    # On Windows, we need to kill the whole process tree if possible, 
-                    # but standard kill() is usually enough for single ffmpeg
                     proc.kill()
             except: pass
 
@@ -170,13 +163,10 @@ def print_progress(worker_id, current, total, prefix='', suffix=''):
     percent = 100 * (current / float(total))
     if percent > 100: percent = 100
     
-    # Dynamic sizing
     width = get_term_width()
-    # Base: [HH:MM:SS] [ID] Prefix |...| 100.0% Suffix
-    # Overhead approx: 10 (time) + len(id) + len(prefix) + 9 (percent) + len(suffix) + 5 (brackets/spaces)
     overhead = 12 + len(worker_id) + len(prefix) + 10 + len(suffix)
-    bar_length = width - overhead - 5 # Buffer
-    if bar_length < 10: bar_length = 10 # Minimum bar
+    bar_length = width - overhead - 5
+    if bar_length < 10: bar_length = 10
     
     filled_length = int(bar_length * current // total)
     bar = '█' * filled_length + '-' * (bar_length - filled_length)
@@ -184,7 +174,6 @@ def print_progress(worker_id, current, total, prefix='', suffix=''):
     line = f'[{datetime.now().strftime("%H:%M:%S")}] [{worker_id}] {prefix} |{bar}| {percent:.1f}% {suffix}'
     
     with CONSOLE_LOCK:
-        # Truncate to avoid wrap
         if len(line) > width: line = line[:width-1]
         sys.stdout.write('\033[2K\r' + line)
         sys.stdout.flush()
@@ -220,7 +209,6 @@ def get_seconds(t):
 
 # --- FFMPEG ---
 def check_ffmpeg():
-    # (Same check logic, condensed for brevity)
     def has_svtav1():
         try:
             res = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -231,7 +219,6 @@ def check_ffmpeg():
         if has_svtav1(): return
         print("[!] FFmpeg found but missing libsvtav1 support.")
     
-    # Auto-install attempt (Linux)
     if platform.system() != 'Windows':
         print("[!] Attempting to install ffmpeg...")
         try: subprocess.run(["sudo", "apt-get", "install", "-y", "ffmpeg"], check=False)
@@ -342,22 +329,19 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                 
                 start_enc = time.time(); last_rep = 0
                 
-                # [FIX] Process Isolation: start_new_session=True (Linux) or CREATE_NEW_PROCESS_GROUP (Windows)
-                # This ensures Ctrl+C only hits Python, not ffmpeg directly.
                 popen_kwargs = {}
                 if platform.system() == 'Windows':
                     popen_kwargs['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP
                 else:
                     popen_kwargs['start_new_session'] = True
 
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **popen_kwargs)
+                # [FIX] Set stdin=subprocess.DEVNULL to prevent FFmpeg from stealing TTY input
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True, **popen_kwargs)
                 
                 with PROC_LOCK: ACTIVE_PROCS[worker_id] = proc
                 
                 while True:
-                    # Check pause *before* reading to prevent blocking
                     if PAUSE_REQUESTED:
-                        # Process is already suspended by main thread logic
                         time.sleep(0.2)
                         continue
 
@@ -472,7 +456,6 @@ def run_worker(args):
         monitor_t.daemon = True
         monitor_t.start()
         
-    # Main Loop (Handles Pause Menu)
     global PAUSE_REQUESTED
     while True:
         # Normal check loop
@@ -508,12 +491,19 @@ def run_worker(args):
                     SHUTDOWN_EVENT.set()
                 elif choice == 's':
                     print("[*] Aborting...")
-                    toggle_processes(suspend=False) # Resume to kill
+                    toggle_processes(suspend=False)
                     kill_processes()
                     SHUTDOWN_EVENT.set()
                     PAUSE_REQUESTED = False
                     sys.exit(0)
-            except Exception: pass # Handle interrupted input
+            except (EOFError, KeyboardInterrupt):
+                # [FIX] Prevent infinite loop on signal interruption or closed stdin
+                sys.stdout.write("\n")
+                time.sleep(0.5)
+                continue
+            except Exception: 
+                # [FIX] Cooldown prevents CPU spam if input() is broken
+                time.sleep(0.5)
             
     if UPDATE_AVAILABLE: apply_update(manager_url)
 
