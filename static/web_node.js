@@ -21,19 +21,7 @@ self.Module = {
     noInitialRun: true,
     noExitRuntime: true,
     // Prevent FS re-initialization which wipes our input file
-    noFSInit: true, 
-    // We handle exit manually to detect job completion
-    quit: function(status, toThrow) {
-        postMessage({type: 'log', level: 'sys', msg: `FFmpeg exit with status ${status}`});
-        if (self.resolveJob) {
-            if (status === 0) self.resolveJob();
-            else self.rejectJob(new Error(`FFmpeg exited with status ${status}`));
-            self.resolveJob = null;
-            self.rejectJob = null;
-        }
-        // Emscripten expects quit to throw to stop execution
-        if (toThrow) throw toThrow;
-    },
+    noFSInit: true,
 };
 
 // Load FFmpeg WASM
@@ -45,6 +33,7 @@ let currentOutputPath = null;
 // Capture Emscripten's message handler (if any) to preserve Pthread communication
 const emscriptenOnMessage = self.onmessage;
 
+// We handle exit manually to detect job completion
 self.Module.quit = function(status, toThrow) {
     postMessage({type: 'log', level: 'sys', msg: `FFmpeg exit with status ${status}`});
     if (self.resolveJob) {

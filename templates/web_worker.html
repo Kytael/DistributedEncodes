@@ -246,7 +246,7 @@
         
         log("Initializing Web Worker...", 'sys');
         // Add cache busting
-        worker = new Worker('/static/web_node.js?v=' + Date.now() + '&r=nofsinit');
+        worker = new Worker('/static/web_node.js?v=' + Date.now() + '&r=cleanup');
         isWorkerReady = false;
 
         return new Promise((resolve, reject) => {
