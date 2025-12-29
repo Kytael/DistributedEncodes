@@ -45,7 +45,7 @@ except ImportError:
 app = Flask(__name__)
 job_queue = queue.Queue()
 queued_job_ids = set() # Track IDs in queue to prevent duplicates
-db_lock = threading.RLock()
+db_lock = threading.Lock()
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024 
 
 # --- SECURITY HELPERS ---
@@ -328,8 +328,11 @@ def api_stats():
         conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
         c.execute(f"SELECT CASE WHEN instr(worker_id, '-') > 0 THEN substr(worker_id, 1, instr(worker_id, '-') - 1) ELSE worker_id END as worker_id, SUM(duration) as total_minutes, COUNT(*) as files_count FROM jobs WHERE status='completed' AND worker_id IS NOT NULL {time_filter} GROUP BY 1 ORDER BY total_minutes DESC")
         sb = [dict(r) for r in c.fetchall()]
-        c.execute("SELECT worker_id, filename, duration, progress, status FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
+        
+        # [FIX] Added COALESCE to show 'Pending...' instead of null
+        c.execute("SELECT COALESCE(worker_id, 'Pending...') as worker_id, filename, duration, progress, status FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
         act = [dict(r) for r in c.fetchall()]
+        
         c.execute("SELECT id, status, worker_id FROM jobs ORDER BY last_updated DESC LIMIT 20")
         hist = [dict(r) for r in c.fetchall()]
         # New Metrics
@@ -403,6 +406,9 @@ def maintenance_loop():
     """Background thread to reset stuck jobs."""
     while True:
         try:
+            # List to store logs so we can write them AFTER releasing the DB lock
+            logs_to_write = [] 
+            
             with db_lock:
                 conn = sqlite3.connect(DB_FILE)
                 cursor = conn.cursor()
@@ -419,12 +425,12 @@ def maintenance_loop():
                             s_time = datetime.strptime(started, "%Y-%m-%d %H:%M:%S.%f")
                             if (now - s_time).total_seconds() > 86400: # 24 hours
                                 reset = True
-                                log_event("WARN", "Job timed out (24h limit). Resetting.", jid)
+                                # Queue the log message instead of writing it immediately
+                                logs_to_write.append(("WARN", "Job timed out (24h limit). Resetting.", jid))
                         except: pass 
                     
                     if reset:
                         cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
-                        # Re-queue in memory
                         if jid not in queued_job_ids:
                              job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(jid, safe='/')}"})
                              queued_job_ids.add(jid)
@@ -440,7 +446,8 @@ def maintenance_loop():
                             l_time = datetime.strptime(last_up, "%Y-%m-%d %H:%M:%S.%f")
                             if (now - l_time).total_seconds() > 7200: # 2 hours
                                 reset = True
-                                log_event("WARN", "Zombie worker detected (2h silence). Resetting.", jid)
+                                # Queue the log message
+                                logs_to_write.append(("WARN", "Zombie worker detected (2h silence). Resetting.", jid))
                         except: pass
                     
                     if reset:
@@ -449,6 +456,12 @@ def maintenance_loop():
                 
                 conn.commit()
                 conn.close()
+            
+            # --- SAFE ZONE: DB lock is released ---
+            # Now we can safely write the logs to the database
+            for level, msg, jid in logs_to_write:
+                log_event(level, msg, jid)
+
         except Exception as e:
             print(f"[!] Maintenance error: {e}")
         
