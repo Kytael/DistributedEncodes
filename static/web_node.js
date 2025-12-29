@@ -15,6 +15,16 @@ self.Module = {
             postMessage({type: 'log', level: 'err', msg: "Runtime initialized but FS missing."});
         }
     },
+    preRun: [function() {
+        const FS = self.Module.FS || self.FS;
+        try {
+            FS.mkdir('/work');
+        } catch(e) { console.log("Mkdir error (might exist): " + e); }
+        
+        try {
+            FS.mount(self.Module.MEMFS, {}, '/work');
+        } catch(e) { console.log("Mount error (might be mounted): " + e); }
+    }],
     // CRITICAL: Point Pthreads to the actual Emscripten JS file, NOT this worker wrapper.
     // Otherwise, Pthreads import web_node.js -> import ffmpeg.js -> infinite loop or broken context.
     mainScriptUrlOrBlob: basePath + "/ffmpeg.js",
@@ -68,11 +78,11 @@ async function processJob(job) {
         throw new Error(`FFmpeg primitives missing. FS: ${!!FS}, callMain: ${!!callMain}`);
     }
 
-    // Use root directory to avoid /tmp mount issues
+    // Use /work directory to avoid /tmp mount issues and ensure clean state
     const inputFilename = "input.mp4";
     const outputFilename = "output.mp4";
-    const inputPath = "/" + inputFilename;
-    const outputPath = "/" + outputFilename;
+    const inputPath = "/work/" + inputFilename;
+    const outputPath = "/work/" + outputFilename;
 
     postMessage({type: 'log', level: 'sys', msg: `Worker processing: ${job.filename}`});
 
@@ -148,9 +158,9 @@ async function processJob(job) {
         } catch(e) { exists = false; }
 
         if (!exists) {
-            // Debug: List root to see what happened
+            // Debug: List /work to see what happened
             try {
-                postMessage({type: 'log', level: 'err', msg: `Root content: ${JSON.stringify(FS.readdir('/'))}`});
+                postMessage({type: 'log', level: 'err', msg: `Work dir content: ${JSON.stringify(FS.readdir('/work'))}`});
             } catch(e){}
             throw new Error("FFmpeg did not create output file (check logs for errors).");
         }
