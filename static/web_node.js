@@ -1,34 +1,57 @@
 // static/web_node.js
 // FRACTUM Web Node Worker
 
+// Calculate base path for loading assets
+const basePath = self.location.href.substring(0, self.location.href.lastIndexOf('/'));
+
 self.Module = {
     print: function(text) { postMessage({type: 'log', level: 'sys', msg: "STDOUT: " + text}); },
     printErr: function(text) { postMessage({type: 'log', level: 'err', msg: "STDERR: " + text}); },
     onRuntimeInitialized: function() {
-        postMessage({type: 'ready'});
-    }
+        // Only signal ready if FS is actually available
+        if (self.Module.FS || self.FS) {
+            postMessage({type: 'ready'});
+        } else {
+            postMessage({type: 'log', level: 'err', msg: "Runtime initialized but FS missing."});
+        }
+    },
+    // CRITICAL: Point Pthreads to the actual Emscripten JS file, NOT this worker wrapper.
+    // Otherwise, Pthreads import web_node.js -> import ffmpeg.js -> infinite loop or broken context.
+    mainScriptUrlOrBlob: basePath + "/ffmpeg.js",
 };
 
 // Load FFmpeg WASM
 importScripts('ffmpeg.js');
 
+// Capture Emscripten's message handler (if any) to preserve Pthread communication
+const emscriptenOnMessage = self.onmessage;
+
 self.onmessage = async function(e) {
     const msg = e.data;
-    if (msg.type === 'run_job') {
+    
+    // Handle our custom job messages
+    if (msg && msg.type === 'run_job') {
         try {
             await processJob(msg.job);
         } catch (err) {
             postMessage({type: 'error', msg: err.toString()});
         }
+        return; // Don't pass job messages to Emscripten
+    }
+
+    // Pass everything else (e.g. Pthread messages) to Emscripten
+    if (emscriptenOnMessage) {
+        emscriptenOnMessage(e);
     }
 };
 
 async function processJob(job) {
-    const FS = self.Module.FS;
-    const callMain = self.Module.callMain;
+    // FS and callMain might be on Module or global scope depending on Emscripten build options
+    const FS = self.Module.FS || self.FS;
+    const callMain = self.Module.callMain || self.callMain;
     
     if (!FS || !callMain) {
-        throw new Error("FFmpeg not initialized");
+        throw new Error(`FFmpeg primitives missing. FS: ${!!FS}, callMain: ${!!callMain}`);
     }
 
     const inputFilename = "input_" + Date.now() + ".mp4";
@@ -55,11 +78,6 @@ async function processJob(job) {
         
         FS.writeFile(inputPath, data);
         
-        // Free buffer memory
-        // data = null; // Can't null const, but function scope handles it? No, explicit helps.
-        // We need 'data' to pass to writeFile, but after that we don't need it.
-        // JS GC should handle it, but we are tight on memory.
-        
         // 3. Execute
         postMessage({type: 'log', level: 'sys', msg: "Starting FFmpeg..."});
         
@@ -80,12 +98,21 @@ async function processJob(job) {
             outputPath
         ];
 
+        // callMain is synchronous in this build
         callMain(args);
 
         // 4. Read Output
         postMessage({type: 'log', level: 'sys', msg: "Reading output..."});
-        if (!FS.analyzePath(outputPath).exists) {
-            throw new Error("FFmpeg did not create output file");
+        
+        // Verify output exists
+        let exists = false;
+        try {
+            const stat = FS.stat(outputPath);
+            exists = true;
+        } catch(e) { exists = false; }
+
+        if (!exists) {
+            throw new Error("FFmpeg did not create output file (check logs for errors).");
         }
         
         const outData = FS.readFile(outputPath);
@@ -96,7 +123,7 @@ async function processJob(job) {
         
         const formData = new FormData();
         formData.append('job_id', job.id);
-        formData.append('worker_id', job.worker_id); // Passed from main
+        formData.append('worker_id', job.worker_id);
         formData.append('file', blob, 'result.mp4');
 
         const up = await fetch('/upload_result', { method: 'POST', body: formData });
@@ -109,8 +136,10 @@ async function processJob(job) {
     } finally {
         // Cleanup
         try {
-            if (FS.analyzePath(inputPath).exists) FS.unlink(inputPath);
-            if (FS.analyzePath(outputPath).exists) FS.unlink(outputPath);
+            if (FS) {
+                try { FS.unlink(inputPath); } catch(e) {}
+                try { FS.unlink(outputPath); } catch(e) {}
+            }
         } catch (e) {
             postMessage({type: 'log', level: 'err', msg: "Cleanup error: " + e.message});
         }
