@@ -48,6 +48,19 @@ queued_job_ids = set() # Track IDs in queue to prevent duplicates
 db_lock = threading.Lock()
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024 
 
+# --- WEB WORKER CONFIGURATION (NEW) ---
+# These headers are required for SharedArrayBuffer support in browsers
+
+@app.after_request
+def add_security_headers(response):
+    """
+    Required for SharedArrayBuffer (which ffmpeg.wasm uses).
+    Without these, the browser will block the worker.
+    """
+    response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
+    response.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
+    return response
+
 # --- SECURITY HELPERS ---
 def check_auth(username, password):
     return username == ADMIN_USER and password == ADMIN_PASS
@@ -189,6 +202,11 @@ def dashboard(): return render_template('dashboard.html')
 @app.route('/admin')
 @requires_auth
 def admin_panel(): return render_template('admin.html')
+
+@app.route('/web_worker')
+def web_worker_client():
+    """Serves the in-browser worker page."""
+    return render_template('web_worker.html')
 
 @app.route('/dl/worker')
 def download_worker_script(): return send_file(WORKER_TEMPLATE_FILE, as_attachment=True, download_name='worker.py')
