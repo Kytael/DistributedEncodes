@@ -301,6 +301,10 @@
         const inputName = "input_" + Date.now(); 
         const outputName = "output.mp4";
 
+        // Resolve Emscripten Exports (Module.FS or global FS)
+        const FS = Module.FS || window.FS;
+        const callMain = Module.callMain || window.callMain;
+
         try {
             // B. DOWNLOAD
             log("Downloading source...", 'sys');
@@ -319,10 +323,10 @@
             let data = new Uint8Array(buf);
             
             // C. WRITE TO VIRTUAL FS
-            if (!Module.FS) throw new Error("FFmpeg FileSystem (FS) not initialized. WASM may have failed to load.");
+            if (!FS) throw new Error("FFmpeg FileSystem (FS) not initialized. WASM may have failed to load.");
             
             log(`Writing ${data.length} bytes to Virtual FS: ${inputName}`, 'sys');
-            Module.FS.writeFile(inputName, data);
+            FS.writeFile(inputName, data);
 
             // [MEMORY] Free JS memory immediately
             data = null; 
@@ -337,7 +341,7 @@
                 const startTime = Date.now();
                 
                 try {
-                    Module.callMain([
+                    callMain([
                         '-i', inputName,
                         '-c:v', 'libsvtav1',
                         '-preset', '8',
@@ -362,7 +366,7 @@
 
             // E. READ OUTPUT
             log("Reading output file...", 'sys');
-            const outData = Module.FS.readFile(outputName);
+            const outData = FS.readFile(outputName);
             const blob = new Blob([outData], { type: 'video/mp4' });
 
             // F. UPLOAD
@@ -382,8 +386,8 @@
         } finally {
             // G. CLEANUP FS
             try {
-                if (Module.FS.analyzePath(inputName).exists) Module.FS.unlink(inputName);
-                if (Module.FS.analyzePath(outputName).exists) Module.FS.unlink(outputName);
+                if (FS && FS.analyzePath(inputName).exists) FS.unlink(inputName);
+                if (FS && FS.analyzePath(outputName).exists) FS.unlink(outputName);
                 log("Cleanup done.", 'sys');
             } catch(e) { console.error(e); }
         }
