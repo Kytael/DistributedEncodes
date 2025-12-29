@@ -20,7 +20,7 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.0.5" # Bumped version for new logging features
+WORKER_VERSION = "1.0.6" # Bumped version
 
 # --- UPDATE COORDINATION ---
 SHUTDOWN_EVENT = threading.Event()
@@ -78,13 +78,10 @@ def check_version(manager_url):
     """Checks if a newer version exists. Returns True if update found."""
     global LAST_UPDATE_CHECK
     with CHECK_LOCK:
-        # Debounce checks (10 minutes)
         if time.time() - LAST_UPDATE_CHECK < 600:
             return False
         LAST_UPDATE_CHECK = time.time()
 
-    # Only log if we are actually checking to avoid spam
-    # safe_print(f"[*] Checking for updates (Current: {WORKER_VERSION})...")
     try:
         url = f"{manager_url}/dl/worker"
         r = requests.get(url, timeout=10)
@@ -121,10 +118,7 @@ def apply_update(manager_url):
         safe_print(f"[!] Failed to apply update: {e}")
 
 def print_progress(worker_id, current, total, prefix='', suffix=''):
-    """
-    Draws a progress bar. 
-    Only used in single-thread mode.
-    """
+    """Draws a progress bar. Only used in single-thread mode."""
     if total <= 0: return
     
     percent = 100 * (current / float(total))
@@ -142,9 +136,7 @@ def print_progress(worker_id, current, total, prefix='', suffix=''):
         sys.stdout.write('\n')
 
 def monitor_status_loop(worker_ids):
-    """
-    Background thread that prints a combined status line for all workers.
-    """
+    """Background thread that prints a combined status line for all workers."""
     while not SHUTDOWN_EVENT.is_set():
         parts = []
         with PROGRESS_LOCK:
@@ -174,7 +166,7 @@ def get_seconds(t):
         return h*3600 + m*60 + s
     except: return 0
 
-# --- FFMPEG INSTALLATION (Collapsed for brevity) ---
+# --- FFMPEG INSTALLATION ---
 def install_ffmpeg_windows():
     print("[*] Downloading FFmpeg for Windows...")
     url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
@@ -312,11 +304,6 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                     dur = probe_data.get('format', {}).get('duration')
                     if dur: total_sec = float(dur); total_min = int(total_sec / 60)
                     
-                    # Log video stream info just for info
-                    vid_stream = next((s for s in probe_data.get('streams', []) if s['codec_type'] == 'video'), None)
-                    if vid_stream:
-                        log(worker_id, f"Video: {vid_stream.get('codec_name')} {vid_stream.get('width')}x{vid_stream.get('height')}")
-
                     audio_streams = [s for s in probe_data.get('streams', []) if s['codec_type'] == 'audio']
                     if audio_streams:
                         audio_index = audio_streams[0]['index']
@@ -342,7 +329,6 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                 for idx in subtitle_indices: cmd.extend(['-map', f'0:{idx}'])
                 cmd.extend(['-c:v', ENCODING_CONFIG["VIDEO_CODEC"], '-preset', ENCODING_CONFIG["VIDEO_PRESET"], '-crf', ENCODING_CONFIG["VIDEO_CRF"], '-pix_fmt', ENCODING_CONFIG["VIDEO_PIX_FMT"], '-vf', ENCODING_CONFIG["VIDEO_SCALE"], '-c:a', ENCODING_CONFIG["AUDIO_CODEC"], '-b:a', ENCODING_CONFIG["AUDIO_BITRATE"], '-ac', ENCODING_CONFIG["AUDIO_CHANNELS"], '-c:s', ENCODING_CONFIG["SUBTITLE_CODEC"], '-progress', 'pipe:1', local_dst])
                 
-                # Log command snippet for debugging
                 log(worker_id, f"FFmpeg: {ENCODING_CONFIG['VIDEO_CODEC']} (CRF {ENCODING_CONFIG['VIDEO_CRF']})")
                 
                 start_enc = time.time()
@@ -398,11 +384,17 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False):
                         try: requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"uploading", "progress":pct})
                         except: pass
 
+                    # [FIX] Check response status code for errors
                     with ProgressFileReader(local_dst, upload_server_callback) as f:
-                        requests.post(f"{manager_url}/upload_result", files={'file': (job_id, f)}, data={'job_id': job_id, 'worker_id': worker_id})
+                        response = requests.post(f"{manager_url}/upload_result", files={'file': (job_id, f)}, data={'job_id': job_id, 'worker_id': worker_id, 'duration': total_min})
                     
                     if single_mode: print_progress(worker_id, 100, 100, prefix='Uploading  ', suffix='Done')
-                    log(worker_id, "Upload complete. Job finalized.")
+                    
+                    if response.status_code == 200:
+                        log(worker_id, "Upload complete. Job finalized.")
+                    else:
+                        log(worker_id, f"Upload REJECTED by server: {response.text}", "ERROR")
+
                 else:
                     log(worker_id, f"FFmpeg failed. Return code: {proc.returncode}", "ERROR")
                     requests.post(f"{manager_url}/report_status", json={"worker_id":worker_id, "job_id":job_id, "status":"failed"})
