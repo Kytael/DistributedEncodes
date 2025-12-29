@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distributed Web Worker</title>
+    <style>
+        body { font-family: sans-serif; background: #1a1a1a; color: #ddd; padding: 20px; max-width: 800px; margin: 0 auto; }
+        .card { background: #2d2d2d; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #444; }
+        h1, h2 { color: #fff; margin-top: 0; }
+        .status-box { font-family: monospace; background: #000; padding: 10px; height: 300px; overflow-y: auto; border: 1px solid #555; color: #0f0; margin-top: 10px; }
+        button { padding: 10px 20px; cursor: pointer; border: none; border-radius: 4px; font-weight: bold; font-size: 16px; transition: 0.2s; }
+        .btn-start { background: #28a745; color: white; }
+        .btn-start:hover { background: #218838; }
+        .btn-stop { background: #dc3545; color: white; }
+        .hidden { display: none; }
+        input { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #222; color: white; width: 200px; }
+    </style>
+    <script src="/static/ffmpeg.js"></script>
+</head>
+<body>
+
+    <h1>🕸️ Distributed Web Worker</h1>
+    
+    <div class="card">
+        <h2>Configuration</h2>
+        <label>Worker Name: <input type="text" id="workerName" value="WebNode-01"></label>
+        <br><br>
+        <button id="btnStart" class="btn-start" onclick="startWorker()">Start Worker</button>
+        <button id="btnStop" class="btn-stop hidden" onclick="stopWorker()">Stop Worker</button>
+        <p><small>Note: Keep this tab open and focused for best performance.</small></p>
+    </div>
+
+    <div class="card">
+        <h2>Worker Log</h2>
+        <div id="log" class="status-box">Ready to start...</div>
+    </div>
+
+<script>
+    let isRunning = false;
+    let ffmpeg = null;
+    const logBox = document.getElementById('log');
+
+    // --- UTILITIES ---
+    function log(msg) {
+        logBox.innerHTML += `<div>[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+        logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    // --- MAIN WORKER LOOP ---
+    async function startWorker() {
+        const workerName = document.getElementById('workerName').value || "WebNode-Anon";
+        document.getElementById('btnStart').classList.add('hidden');
+        document.getElementById('btnStop').classList.remove('hidden');
+        isRunning = true;
+
+        log("🚀 Initializing FFmpeg WASM...");
+        
+        try {
+            // Initialize your custom FFmpeg instance
+            // NOTE: Depending on how you built ffmpeg.js, this syntax might vary slightly.
+            // This assumes the standard createFFmpeg factory pattern.
+            if (!ffmpeg) {
+                ffmpeg = createFFmpeg({
+                    log: true,
+                    corePath: '/static/ffmpeg.wasm',
+                    workerPath: '/static/ffmpeg.worker.js'
+                });
+                await ffmpeg.load();
+            }
+            log("✅ FFmpeg Loaded!");
+        } catch (e) {
+            log("❌ Failed to load FFmpeg: " + e.message);
+            stopWorker();
+            return;
+        }
+
+        while (isRunning) {
+            try {
+                // 1. Request Job
+                log("🔄 Requesting job...");
+                const res = await fetch('/get_job');
+                const data = await res.json();
+
+                if (data.status === 'empty') {
+                    log("💤 Queue empty. Waiting 10s...");
+                    await sleep(10000);
+                    continue;
+                }
+
+                if (data.status === 'ok') {
+                    const job = data.job;
+                    const jobId = job.id;
+                    const inputName = `input_${Date.now()}.mkv`;
+                    const outputName = `output_${Date.now()}.mp4`;
+
+                    log(`🎬 Job received: ${job.filename} (${jobId})`);
+
+                    // 2. Download Source File
+                    log("⬇️ Downloading source file...");
+                    const dlRes = await fetch(job.download_url);
+                    const fileData = await dlRes.arrayBuffer();
+                    ffmpeg.FS('writeFile', inputName, new Uint8Array(fileData));
+                    log(`📦 File downloaded (${(fileData.byteLength / 1024 / 1024).toFixed(2)} MB)`);
+
+                    // 3. Run Encoding (Matching worker_template.py args)
+                    log("⚙️ Transcoding started (This may take a while)...");
+                    const startTime = Date.now();
+
+                    // Arguments strictly matching your worker_template.py
+                    await ffmpeg.run(
+                        '-i', inputName,
+                        '-c:v', 'libsvtav1', 
+                        '-preset', '8', 
+                        '-crf', '35', 
+                        '-g', '240', 
+                        '-pix_fmt', 'yuv420p10le', 
+                        '-svtav1-params', 'tune=0', 
+                        '-c:a', 'libopus', 
+                        '-b:a', '128k', 
+                        '-ac', '1',
+                        outputName
+                    );
+
+                    const duration = (Date.now() - startTime) / 1000;
+                    log(`✅ Transcoding finished in ${duration.toFixed(1)}s`);
+
+                    // 4. Read & Upload Result
+                    log("⬆️ Uploading result...");
+                    const outData = ffmpeg.FS('readFile', outputName);
+                    const blob = new Blob([outData.buffer], { type: 'video/mp4' });
+
+                    const formData = new FormData();
+                    formData.append('job_id', jobId);
+                    formData.append('worker_id', workerName + " (Web)");
+                    formData.append('duration', duration);
+                    formData.append('file', blob, 'result.mp4');
+
+                    const upRes = await fetch('/upload_result', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    if (upRes.ok) {
+                        log("🎉 Upload complete!");
+                    } else {
+                        log("❌ Upload failed.");
+                        // Report failure logic here if desired
+                    }
+
+                    // Cleanup Memory
+                    try {
+                        ffmpeg.FS('unlink', inputName);
+                        ffmpeg.FS('unlink', outputName);
+                    } catch(e) {}
+                }
+
+            } catch (e) {
+                log("❌ Error in loop: " + e.message);
+                await sleep(5000);
+            }
+        }
+    }
+
+    function stopWorker() {
+        isRunning = false;
+        document.getElementById('btnStart').classList.remove('hidden');
+        document.getElementById('btnStop').classList.add('hidden');
+        log("🛑 Worker stopped.");
+    }
+</script>
+</body>
+</html>
