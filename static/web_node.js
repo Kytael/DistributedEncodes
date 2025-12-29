@@ -79,6 +79,18 @@ async function processJob(job) {
         try { FS.mkdir('/tmp'); } catch(e) {}
         
         FS.writeFile(inputPath, data);
+
+        // DEBUG: Verify file existence
+        try {
+            const tmpFiles = FS.readdir('/tmp');
+            postMessage({type: 'log', level: 'sys', msg: `DEBUG: /tmp contents: ${JSON.stringify(tmpFiles)}`});
+            const cwd = FS.cwd();
+            postMessage({type: 'log', level: 'sys', msg: `DEBUG: CWD: ${cwd}`});
+            const stat = FS.stat(inputPath);
+            postMessage({type: 'log', level: 'sys', msg: `DEBUG: Input file stat: ${stat.size} bytes`});
+        } catch(e) {
+            postMessage({type: 'log', level: 'err', msg: `DEBUG: File check failed: ${e.message}`});
+        }
         
         // 3. Execute
         postMessage({type: 'log', level: 'sys', msg: "Starting FFmpeg..."});
