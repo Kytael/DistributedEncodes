@@ -162,19 +162,6 @@
     </style>
 
     <script>
-        var isFFmpegReady = false;
-
-        var Module = {
-            noInitialRun: true,
-            print: function(text) { log("STDOUT: " + text, 'sys'); },
-            printErr: function(text) { log("STDERR: " + text, 'err'); },
-            onRuntimeInitialized: function() {
-                isFFmpegReady = true;
-                log("SYSTEM: FFmpeg WASM Runtime Initialized.", 'succ');
-                log("NOTE: Encoding runs on the main thread. Browser may freeze during 'callMain'.", 'sys');
-            }
-        };
-
         function log(msg, type='normal') {
             const box = document.getElementById('log');
             if (box) {
@@ -191,7 +178,6 @@
             console.log(msg);
         }
     </script>
-    <script src="/static/ffmpeg.js"></script>
 </head>
 <body>
 
@@ -223,17 +209,17 @@
 
         <div class="card">
             <div class="card-header">>> CONSOLE_OUTPUT</div>
-            <div id="log" class="log-box">Initializing WASM Core...</div>
+            <div id="log" class="log-box">System Ready.</div>
         </div>
     </div>
 
 <script>
-    // Set default name logic if needed, but we hardcoded defaults in HTML for simplicity
-    document.addEventListener("DOMContentLoaded", () => {
-        // Optional: Pre-fill specific logic if required
-    });
-
     let isRunning = false;
+    let worker = null;
+    let currentWorkerId = "";
+    
+    // Track if worker is ready (module initialized)
+    let isWorkerReady = false; 
 
     async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -247,45 +233,95 @@
     function stopLoop() {
         isRunning = false;
         log("STOP command received. Finishing current job...", 'err');
+        if (worker) {
+            worker.terminate();
+            worker = null;
+            log("Worker terminated immediately.", 'err');
+            toggleButtons(false);
+        }
+    }
+
+    async function initWorker() {
+        if (worker) worker.terminate();
+        
+        log("Initializing Web Worker...", 'sys');
+        worker = new Worker('/static/web_node.js');
+        isWorkerReady = false;
+
+        return new Promise((resolve, reject) => {
+            worker.onmessage = (e) => {
+                const msg = e.data;
+                if (msg.type === 'log') {
+                    log(msg.msg, msg.level);
+                } else if (msg.type === 'ready') {
+                    isWorkerReady = true;
+                    log("Worker (FFmpeg WASM) Initialized.", 'succ');
+                    resolve();
+                } else if (msg.type === 'error') {
+                    // Initialization error
+                    if (!isWorkerReady) reject(msg.msg);
+                }
+            };
+            worker.onerror = (e) => {
+                log("Worker Error: " + (e.message || e), 'err');
+                reject(e);
+            };
+        });
     }
 
     async function startLoop() {
-        if (!isFFmpegReady) {
-            alert("FFmpeg is not ready yet. Please wait for the WASM to load.");
-            return;
-        }
-
         const user = document.getElementById('username').value.trim() || "Anonymous";
         const node = document.getElementById('workerName').value.trim() || "WebNode";
-        // Format: Username-WorkerName-Timestamp-ThreadID
-        // We use a fixed timestamp per session start to identify this specific run instance
         const runId = Math.floor(Date.now() / 1000); 
-        const fullWorkerId = `${user}-${node}-${runId}-1`;
+        currentWorkerId = `${user}-${node}-${runId}-1`;
+
+        try {
+            await initWorker();
+        } catch (e) {
+            log("Failed to initialize worker: " + e, 'err');
+            return;
+        }
 
         isRunning = true;
         toggleButtons(true);
         
-        log(`Worker [${fullWorkerId}] Started. Polling for jobs...`, 'succ');
+        log(`Worker [${currentWorkerId}] Started. Polling for jobs...`, 'succ');
 
         while (isRunning) {
             try {
                 // A. GET JOB
-                // Request max 512MB job for web node stability (reduced from 1024)
+                // Request max 256MB initially to be safe? 
+                // The worker has 1GB heap, but overhead matters. 
+                // Let's try 512MB again, hoping separate thread helps.
                 const res = await fetch('/get_job?max_size_mb=512');
                 const data = await res.json();
 
                 if (data.status === 'empty') {
-                    // log("Queue empty. Waiting 10s...", 'sys'); // verbose
                     await sleep(10000);
                     continue;
                 }
 
                 if (data.status === 'ok') {
-                    await processJob(data.job, fullWorkerId);
+                    const job = data.job;
+                    job.worker_id = currentWorkerId;
+                    
+                    log(`STARTING JOB: ${job.filename} (${job.id})`, 'sys');
+
+                    // Run in worker and wait
+                    await runJobInWorker(job);
+                    log("Job Cycle Complete.", 'succ');
+                    
+                    // Optional: Restart worker every few jobs to clear fragmentation?
+                    // For now, let's keep it running unless it crashes.
                 }
 
             } catch (e) {
-                log("ERROR: " + e.message, 'err');
+                log("LOOP ERROR: " + e.message, 'err');
+                // If the error implies worker crash, restart it
+                if (worker === null) { 
+                    log("Worker seems dead. Restarting...", 'err');
+                    try { await initWorker(); } catch(err) { isRunning = false; }
+                }
                 await sleep(5000);
             }
         }
@@ -294,122 +330,37 @@
         log("Worker Stopped.", 'err');
     }
 
-    async function processJob(job, workerName) {
-        const jobId = job.id;
-        log(`STARTING JOB: ${job.filename} (${jobId})`, 'sys');
-        
-        // Simplified absolute paths
-        const inputPath = "/tmp/input.mp4";
-        const outputPath = "/tmp/output.mp4";
-
-        // Resolve Emscripten Exports (Module.FS or global FS)
-        const FS = Module.FS || window.FS;
-        const callMain = Module.callMain || window.callMain;
-
-        try {
-            // B. DOWNLOAD
-            log("Downloading source...", 'sys');
-            const dl = await fetch(job.download_url);
-            
-            // [SAFETY] Check file size before loading into RAM
-            const contentLength = dl.headers.get('content-length');
-            if (contentLength) {
-                const sizeMB = parseInt(contentLength) / (1024 * 1024);
-                if (sizeMB > 1024) { 
-                    throw new Error(`File too large for Web Node (${sizeMB.toFixed(2)} MB). Limit is 1GB.`);
-                }
+    function runJobInWorker(job) {
+        return new Promise((resolve, reject) => {
+            if (!worker) {
+                reject(new Error("Worker not initialized"));
+                return;
             }
 
-            const buf = await dl.arrayBuffer();
-            let data = new Uint8Array(buf);
+            // Define temporary handler for this job
+            const originalOnMsg = worker.onmessage;
             
-            // C. WRITE TO VIRTUAL FS
-            if (!FS) throw new Error("FFmpeg FileSystem (FS) not initialized. WASM may have failed to load.");
-            
-            // Ensure /tmp exists (standard Emscripten path, but safe to check)
-            try { FS.mkdir('/tmp'); } catch(e) {}
-
-            log(`Writing ${data.length} bytes to Virtual FS: ${inputPath}`, 'sys');
-            FS.writeFile(inputPath, data);
-            
-            // [DEBUG] Verify FS state
-            try {
-                const stat = FS.stat(inputPath);
-                log(`File stat: size=${stat.size}, mode=${stat.mode}`, 'sys');
-            } catch(e) {
-                log(`FS Verification Error: ${e.message}`, 'err');
-            }
-
-            // [MEMORY] Free JS memory immediately
-            data = null; 
-
-            // D. EXECUTE (Synchronous callMain)
-            log("EXECUTE: callMain(). Browser will FREEZE now...", 'err');
-            
-            // Use setTimeout to allow the DOM to update the "Freeze" warning before we block the thread
-            await new Promise(resolve => setTimeout(() => {
-                const startTime = Date.now();
-                
-                try {
-                    callMain([
-                        '-threads', '1',          // Force single-thread to avoid FS proxy issues
-                        '-v', 'verbose',          // Debug logging
-                        '-i', inputPath,
-                        '-c:v', 'libsvtav1',
-                        '-preset', '8',
-                        '-crf', '35',
-                        '-g', '240',
-                        '-pix_fmt', 'yuv420p10le', 
-                        '-svtav1-params', 'tune=0',
-                        '-c:a', 'libopus',
-                        '-b:a', '128k',
-                        '-ac', '1',
-                        outputPath
-                    ]);
-                } catch (err) {
-                    log("FFmpeg Crashed: " + err, 'err');
-                    throw err;
+            worker.onmessage = (e) => {
+                const msg = e.data;
+                if (msg.type === 'log') {
+                    log(msg.msg, msg.level);
+                } else if (msg.type === 'done') {
+                    // Restore original handler (for logs/ready) or just keep it?
+                    // Re-init handles logging generally.
+                    resolve();
+                } else if (msg.type === 'error') {
+                    reject(new Error(msg.msg));
                 }
-
-                const duration = (Date.now() - startTime) / 1000;
-                log(`Transcoding Finished in ${duration.toFixed(1)}s`, 'succ');
-                resolve(duration);
-            }, 50)); 
-
-            // E. READ OUTPUT
-            log("Reading output file...", 'sys');
-            // Check if output exists
-            if (!FS.analyzePath(outputPath).exists) {
-                throw new Error("Output file was not created by FFmpeg.");
-            }
+            };
             
-            const outData = FS.readFile(outputPath);
-            const blob = new Blob([outData], { type: 'video/mp4' });
+            // If worker crashes/terminates during job
+            worker.onerror = (e) => {
+                reject(new Error("Worker Crashed: " + e.message));
+                worker = null; // Mark as dead
+            };
 
-            // F. UPLOAD
-            log(`Uploading ${outData.length} bytes...`, 'sys');
-            const formData = new FormData();
-            formData.append('job_id', jobId);
-            formData.append('worker_id', workerName);
-            formData.append('file', blob, 'result.mp4');
-
-            const up = await fetch('/upload_result', { method: 'POST', body: formData });
-            
-            if (up.ok) log("Upload Success!", 'succ');
-            else log("Upload Failed: " + up.statusText, 'err');
-
-        } catch (e) {
-            log("JOB FAILED: " + e, 'err');
-        } finally {
-            // G. CLEANUP FS
-            try {
-                if (FS) {
-                    if (FS.analyzePath(inputPath).exists) FS.unlink(inputPath);
-                    if (FS.analyzePath(outputPath).exists) FS.unlink(outputPath);
-                }
-                log("Cleanup done.", 'sys');
-            } catch(e) { console.error(e); }
-        }
+            worker.postMessage({type: 'run_job', job: job});
+        });
     }
 </script>
 
