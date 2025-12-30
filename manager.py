@@ -102,12 +102,14 @@ def add_security_headers(response):
 def csrf_protect():
     """[FIX] Basic CSRF Protection for Admin API"""
     if request.method == "POST" and request.path.startswith('/api/admin_action'):
-        # Check Origin/Referer
         origin = request.headers.get('Origin')
+        referer = request.headers.get('Referer')
+        target = origin or referer or ""
         
-        # Allow if origin matches our server (simplified check)
-        if origin and SERVER_HOST not in origin and 'localhost' not in origin:
-            return jsonify({"status": "error", "message": "CSRF Blocked"}), 403
+        # [FIXED] Compare against request.host (the URL you typed) 
+        # instead of SERVER_HOST (0.0.0.0)
+        if request.host not in target:
+             return jsonify({"status": "error", "message": "CSRF Blocked: Origin Mismatch"}), 403
 
 def check_auth(username, password):
     return username == ADMIN_USER and password == ADMIN_PASS
