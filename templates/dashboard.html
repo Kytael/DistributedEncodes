@@ -190,22 +190,6 @@
         .os-title { color: var(--neon-purple); font-weight: bold; margin-bottom: 8px; display: block; font-size: 1.1em; }
         code { background: rgba(0,0,0,0.5); padding: 2px 6px; color: var(--neon-pink); border: 1px solid #333; font-size: 0.9em; display: block; overflow-x: auto; margin-top: 5px; }
 
-        @keyframes pulse-green {
-            0% { box-shadow: 0 0 0 0 rgba(0, 255, 65, 0.4); }
-            70% { box-shadow: 0 0 0 10px rgba(0, 255, 65, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(0, 255, 65, 0); }
-        }
-        .web-node-btn {
-            background-color: var(--neon-green) !important;
-            color: black !important;
-            border-color: var(--neon-green) !important;
-            box-shadow: 0 0 15px var(--neon-green);
-            animation: pulse-green 2s infinite;
-        }
-        .web-node-btn:hover {
-            background-color: #fff !important;
-            box-shadow: 0 0 25px #fff;
-        }
     </style>
 </head>
 <body>
@@ -257,20 +241,12 @@
             <h2>>> DEPLOY_WORKER</h2>
             <div class="modal-content">
                 <p>Contribute your computing power to the network. Choose your deployment method below.</p>
-                
-                <div class="os-section" style="border-left-color: var(--neon-green);">
-                    <span class="os-title" style="color: var(--neon-green);">:: WEB BROWSER (INSTANT)</span>
-                    <p style="margin: 5px 0 10px 0; color: #ccc;">
-                        Run a worker directly in this tab. No installation required.<br>
-                        <em style="color: var(--text-dim); font-size: 0.9em;">(Note: Slower than native app due to browser limits. Single-threaded.)</em>
-                    </p>
-                    <a href="/web_worker" class="modal-btn web-node-btn" style="display:inline-block; margin-top:5px; text-decoration:none;">LAUNCH WEB NODE</a>
-                </div>
 
                 <div class="os-section">
                     <span class="os-title">:: LINUX (ONE-LINER)</span>
                     Run this command to auto-install and join (Requires Curl & Sudo):
                     <code id="linux-cmd">Loading...</code>
+                    <p style="font-size:0.8em; color:#888; margin-top:5px;">To focus on a series, append <code>&series_id=X</code> to the URL.</p>
                 </div>
                 
                 <div class="os-section">
@@ -278,6 +254,7 @@
                     1. Download the script below.<br>
                     2. Install Python 3 & FFmpeg (with SVT-AV1).<br>
                     3. Run: <code>python worker.py --manager <span id="mgr-url">...</span></code>
+                    <p style="font-size:0.8em; color:#888; margin-top:5px;">To focus on a series, add <code>--series-id X</code> to the command.</p>
                 </div>
 
                 <div style="text-align: center; margin-top: 30px;">
