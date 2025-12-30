@@ -253,6 +253,37 @@ def scan_and_queue():
             queued_job_ids.add(row[0])
     conn.close()
 
+# [NEW] Series Enumeration Helper
+def get_series_list():
+    try:
+        # 1. Get folders from disk
+        if not os.path.exists(SOURCE_DIRECTORY): return []
+        folders = [d for d in os.listdir(SOURCE_DIRECTORY) if os.path.isdir(os.path.join(SOURCE_DIRECTORY, d))]
+        folders.sort() # Alphabetical Sort ensures ID 1 is always the same series (mostly)
+
+        # 2. Load Friendly Name Map
+        mapping = {}
+        if os.path.exists('series_names.json'):
+            try:
+                with open('series_names.json', 'r') as f:
+                    mapping = json.load(f)
+            except: pass
+
+        # 3. Build Result List
+        series_data = []
+        for idx, folder in enumerate(folders):
+            series_id = idx + 1
+            friendly = mapping.get(folder, folder) # Default to folder name if no mapping
+            series_data.append({
+                "id": series_id,
+                "folder": folder,
+                "name": friendly
+            })
+        return series_data
+    except Exception as e:
+        print(f"[!] Error getting series list: {e}")
+        return []
+
 # ==============================================================================
 # ROUTES
 # ==============================================================================
@@ -271,15 +302,20 @@ def admin_panel(): return render_template('admin.html')
 @app.route('/dl/worker')
 def download_worker_script(): return send_file(WORKER_TEMPLATE_FILE, as_attachment=True, download_name='worker.py')
 
+@app.route('/api/series')
+def api_series_list():
+    """[NEW] Returns the list of series with IDs for the Dashboard"""
+    return jsonify({"series": get_series_list()})
+
 @app.route('/install')
 def install_script():
     # [FIX] Sanitize inputs
     u = sanitize_input(request.args.get('username')) or 'Anonymous'
     w = sanitize_input(request.args.get('workername')) or 'LinuxNode'
-    s = request.args.get('series', '') # [NEW] Install with Series Filter
     
-    # Sanitize Series (Allow spaces/slashes for folders)
-    if s: s = re.sub(r'[^a-zA-Z0-9 _\-/]', '', s)
+    # [NEW] Handle Numeric Series ID
+    s_id = request.args.get('series_id', '') 
+    if s_id and not s_id.isdigit(): s_id = '' # Security check
     
     j = request.args.get('jobs', '1')
     if not j.isdigit(): j = '1'
@@ -295,7 +331,7 @@ curl -s "{SERVER_URL_DISPLAY.rstrip('/')}/dl/worker" -o worker.py
 echo "[*] Starting Worker..."
 # Auto-injecting the token from server configuration
 export WORKER_SECRET="{WORKER_SECRET}"
-python3 worker.py --username "{u}" --workername "{w}" --jobs {j} --manager "{SERVER_URL_DISPLAY}" --series "{s}"
+python3 worker.py --username "{u}" --workername "{w}" --jobs {j} --manager "{SERVER_URL_DISPLAY}" --series-id "{s_id}"
 """
     return Response(script, mimetype='text/x-shellscript')
 
@@ -307,7 +343,18 @@ def download_source(filename):
 @requires_worker_auth # [FIX] Auth Required
 def get_job():
     max_size_mb = request.args.get('max_size_mb')
-    series_filter = request.args.get('series') # [NEW] Series Filter
+    
+    # [NEW] Handle Series ID Logic
+    series_id = request.args.get('series_id')
+    folder_filter = None
+    
+    if series_id and series_id.isdigit():
+        series_list = get_series_list()
+        # Find the folder corresponding to the ID
+        for s in series_list:
+            if s['id'] == int(series_id):
+                folder_filter = s['folder']
+                break
     
     params = []
     query_parts = ["status='queued'"]
@@ -318,18 +365,17 @@ def get_job():
         query_parts.append("file_size <= ?")
         params.append(limit_bytes)
         
-    # [NEW] Filter by Series (Folder Name)
-    if series_filter:
+    # [NEW] Apply Folder Filter from ID
+    if folder_filter:
         query_parts.append("id LIKE ?")
-        # Matches 'SeriesName/%' or just 'SeriesName' if it's a file
-        params.append(f"{series_filter}%")
+        # Matches 'SeriesName/%' or 'SeriesName'
+        params.append(f"{folder_filter}%")
 
     try:
         with db_lock:
             conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
             
             # [CHANGED] ORDER BY id ASC (Path Sort)
-            # This ensures Series A/Season 1 comes before Series A/Season 2
             where_clause = " AND ".join(query_parts)
             sql = f"SELECT id, filename, file_size FROM jobs WHERE {where_clause} ORDER BY id ASC LIMIT 1"
             
