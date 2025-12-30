@@ -147,17 +147,31 @@
         }
     </style>
     <script>
+        // [FIX] Sanitization function to prevent XSS
+        function escapeHTML(str) {
+            if (!str) return "";
+            return str.replace(/[&<>'"]/g, 
+                tag => ({
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    "'": '&#39;',
+                    '"': '&quot;'
+                }[tag]));
+        }
+
         function loadJobs() {
             fetch('/api/all_jobs').then(r => r.json()).then(data => {
                 let html = "";
                 data.jobs.forEach(j => {
                     const cleanName = j.id.split('/').pop();
+                    // [FIX] Applied escapeHTML to j.id and cleanName
                     html += `<tr>
-                        <td><span class="file-name" title="${j.id}">${cleanName}</span></td>
+                        <td><span class="file-name" title="${escapeHTML(j.id)}">${escapeHTML(cleanName)}</span></td>
                         <td class="status-${j.status}">${j.status.toUpperCase()}</td>
                         <td>
-                            ${(j.status === 'failed' || j.status === 'completed') ? `<button class="btn-retry" onclick="act('${j.id}','retry')">[ RETRY ]</button>` : ''}
-                            <button class="btn-delete" onclick="act('${j.id}','delete')">[ DELETE ]</button>
+                            ${(j.status === 'failed' || j.status === 'completed') ? `<button class="btn-retry" onclick="act('${escapeHTML(j.id)}','retry')">[ RETRY ]</button>` : ''}
+                            <button class="btn-delete" onclick="act('${escapeHTML(j.id)}','delete')">[ DELETE ]</button>
                         </td>
                     </tr>`;
                 });
@@ -174,11 +188,12 @@
                     if(l.level === 'WARN') color = '#ffaa00';
                     if(l.level === 'INFO') color = 'var(--neon-green)';
                     
+                    // [FIX] Applied escapeHTML to l.message and l.related_id
                     html += `<tr>
                         <td style="color:var(--text-dim); font-size:0.8em; white-space:nowrap;">${l.timestamp}</td>
                         <td style="color:${color}; font-weight:bold">${l.level}</td>
-                        <td style="word-break: break-all;">${l.message}</td>
-                        <td style="font-family:monospace; font-size:0.8em; color:var(--text-dim);">${l.related_id || '-'}</td>
+                        <td style="word-break: break-all;">${escapeHTML(l.message)}</td>
+                        <td style="font-family:monospace; font-size:0.8em; color:var(--text-dim);">${escapeHTML(l.related_id) || '-'}</td>
                     </tr>`;
                 });
                 document.getElementById('log-list').innerHTML = html || '<tr><td colspan="4" style="text-align:center; padding:20px; color:var(--text-dim);">// NO LOGS FOUND //</td></tr>';
