@@ -177,13 +177,14 @@ async function processJob(job) {
             '-crf', '63',
             '-g', '240',
             '-pix_fmt', 'yuv420p', 
-            '-svtav1-params', 'tune=0:lp=1:logical-processors=1',
+            '-svtav1-params', 'tune=0:lp=1',
             '-vf', 'scale=-2:480',
             '-c:a', 'opus',
             '-b:a', '12k',
             '-ac', '1',
             '-strict', '-2',
             '-c:s', 'mov_text',
+            '-svtav1-params', 'logical-processors=2',
 
 '
             outputPath
