@@ -7,7 +7,6 @@
     <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            /* Theme Variables matching VSV */
             --bg-dark: #000000;
             --bg-panel: #0a0a0a;
             --neon-purple: #cc00ff;
@@ -17,10 +16,7 @@
             --text-dim: #888888;
             --font: 'Roboto Mono', monospace;
         }
-        /* [FIX] Global Box Sizing to prevent overflow */
-        *, *::before, *::after {
-            box-sizing: border-box;
-        }
+        *, *::before, *::after { box-sizing: border-box; }
         body {
             background-color: var(--bg-dark);
             color: var(--text-light);
@@ -54,10 +50,7 @@
             flex-wrap: wrap; 
             gap: 20px; 
         }
-        .header-title-group {
-            display: flex;
-            flex-direction: column;
-        }
+        .header-title-group { display: flex; flex-direction: column; }
         .back-link {
             color: var(--text-dim);
             text-decoration: none;
@@ -65,10 +58,7 @@
             margin-bottom: 5px;
             transition: color 0.2s;
         }
-        .back-link:hover {
-            color: var(--neon-pink);
-            text-shadow: 0 0 5px var(--neon-pink);
-        }
+        .back-link:hover { color: var(--neon-pink); text-shadow: 0 0 5px var(--neon-pink); }
         
         h1 { 
             color: var(--neon-pink); 
@@ -80,7 +70,6 @@
             word-break: break-word; 
         }
 
-        /* Updated Button Style */
         .join-btn { 
             background: transparent; 
             border: 2px solid var(--neon-purple); 
@@ -96,7 +85,6 @@
             white-space: nowrap; 
             flex-shrink: 0; 
         }
-        
         .join-btn:hover { 
             background: var(--neon-pink); 
             border-color: var(--neon-pink); 
@@ -202,7 +190,6 @@
         .os-title { color: var(--neon-purple); font-weight: bold; margin-bottom: 8px; display: block; font-size: 1.1em; }
         code { background: rgba(0,0,0,0.5); padding: 2px 6px; color: var(--neon-pink); border: 1px solid #333; font-size: 0.9em; display: block; overflow-x: auto; margin-top: 5px; }
 
-        /* [NEW] Pulse Animation for Web Node */
         @keyframes pulse-green {
             0% { box-shadow: 0 0 0 0 rgba(0, 255, 65, 0.4); }
             70% { box-shadow: 0 0 0 10px rgba(0, 255, 65, 0); }
@@ -240,6 +227,11 @@
         </div>
         
         <div class="grid">
+            <div class="card" style="max-height: 400px; overflow-y: auto;">
+                <div class="card-header"><h3>>> SERIES_MAP</h3></div>
+                <table id="series-table"><tbody><tr><td>Loading...</td></tr></tbody></table>
+            </div>
+
             <div class="card">
                 <div class="card-header">
                     <h3>>> LEADERBOARD</h3>
@@ -326,6 +318,22 @@
                 }[tag]));
         }
 
+        // [NEW] Load Series Map for ID Reference
+        async function loadSeries() {
+            try {
+                const res = await fetch('/api/series');
+                const data = await res.json();
+                const html = data.series.map(s => 
+                    `<tr>
+                        <td style="color:var(--neon-purple); font-weight:bold; width:50px;">ID: ${s.id}</td>
+                        <td style="color:var(--text-light);">${escapeHTML(s.name)}</td>
+                        <td style="font-size:0.8em; color:var(--text-dim); text-align:right;">${escapeHTML(s.folder)}</td>
+                    </tr>`
+                ).join('');
+                document.getElementById('series-table').innerHTML = html || '<tr><td>No Series Found</td></tr>';
+            } catch(e) {}
+        }
+
         function setFilter(val) {
             currentFilter = val;
             document.querySelectorAll('.filters button').forEach(b => b.classList.remove('active'));
@@ -335,12 +343,10 @@
 
         async function update() {
             try {
-                // Fetch from existing manager.py endpoint
                 const res = await fetch(`${API_URL}?filter=${currentFilter}`);
                 if (!res.ok) throw new Error("API Offline");
                 const rawData = await res.json();
                 
-                // Adapter: Map manager.py JSON format to Dashboard format
                 const completed = rawData.scoreboard.reduce((acc, u) => acc + u.files_count, 0);
                 const activeCount = rawData.active.length;
                 
@@ -363,7 +369,6 @@
                     }))
                 };
                 
-                // Update DOM
                 document.getElementById('total').innerText = data.queue.total;
                 document.getElementById('pending').innerText = data.queue.pending;
                 document.getElementById('processing').innerText = data.queue.processing;
@@ -396,6 +401,8 @@
             } catch (e) { console.error(e); }
         }
 
+        // Init
+        loadSeries();
         setInterval(update, 5000); 
         update();
     </script>
