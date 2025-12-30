@@ -164,12 +164,21 @@
             background: rgba(0,0,0,0.85); z-index: 1000; justify-content: center; align-items: center; backdrop-filter: blur(2px);
         }
         .modal { 
-            background: #050505; border: 2px solid var(--neon-pink); width: 90%; max-width: 600px; padding: 30px; 
-            box-shadow: 0 0 30px rgba(255,0,170,0.4); position: relative; 
+            background: #050505; 
+            border: 2px solid var(--neon-pink); 
+            width: 90%; 
+            max-width: 600px; 
+            padding: 30px; 
+            box-shadow: 0 0 30px rgba(255,0,170,0.4); 
+            position: relative; 
             background-image: 
                 linear-gradient(to right, rgba(255,0,170,0.05) 1px, transparent 1px),
                 linear-gradient(to bottom, rgba(255,0,170,0.05) 1px, transparent 1px);
             background-size: 20px 20px;
+            
+            /* [FIX] SCROLLABLE MODAL */
+            max-height: 90vh; /* Max height 90% of viewport */
+            overflow-y: auto; /* Enable vertical scroll if content is too long */
         }
         .modal h2 { 
             margin-top: 0; color: var(--neon-pink); border-bottom: 1px dashed var(--neon-pink); padding-bottom: 15px; text-shadow: 0 0 5px var(--neon-pink);
@@ -257,7 +266,7 @@
                 </div>
 
                 <div style="margin-top: 30px; border-top: 1px dashed var(--neon-purple); padding-top: 20px;">
-                    <span class="os-title" style="color: var(--text-light);">:: AVAILABLE SERIES IDs</span>
+                    <span class="os-title" style="color: var(--text-light);">:: SERIES ID REFERENCE</span>
                     <p style="font-size:0.8em; color:#888; margin-bottom:10px;">Use these IDs with the <code>--series-id</code> flag.</p>
                     <div style="max-height: 150px; overflow-y: auto; background:rgba(255,255,255,0.05); padding:10px; border:1px solid #333;">
                         <table id="series-table" style="width:100%;"><tbody><tr><td>Loading...</td></tr></tbody></table>
