@@ -128,14 +128,22 @@ def requires_auth(f):
     return decorated
 
 def requires_worker_auth(f):
-    """[FIX] Middleware to enforce Worker Token"""
+    """[MODIFIED] Auth Middleware with TRANSITION MODE (Legacy Support)"""
     @wraps(f)
     def decorated(*args, **kwargs):
         # Check header or query param
         token = request.headers.get('X-Worker-Token') or request.args.get('token')
+        
+        # --- TRANSITION MODE START ---
+        # If no token is provided, assume it's an old worker and ALLOW it.
+        if token is None:
+            return f(*args, **kwargs)
+        # --- TRANSITION MODE END ---
+
+        # If a token IS provided, it MUST be correct (blocks attackers guessing)
         if token != WORKER_SECRET:
-            # For strict security, return 401
             return jsonify({"status": "error", "message": "Unauthorized Worker"}), 401
+            
         return f(*args, **kwargs)
     return decorated
 
