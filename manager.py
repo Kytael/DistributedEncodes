@@ -107,7 +107,6 @@ def csrf_protect():
         target = origin or referer or ""
         
         # [FIXED] Compare against request.host (the URL you typed) 
-        # instead of SERVER_HOST (0.0.0.0)
         if request.host not in target:
              return jsonify({"status": "error", "message": "CSRF Blocked: Origin Mismatch"}), 403
 
@@ -293,8 +292,9 @@ def get_series_list():
 @app.route('/')
 def dashboard(): return render_template('dashboard.html')
 
-@app.route('/web_worker')
-def web_worker_client(): return render_template('web_worker.html')
+# [REMOVED] Web Worker references for now
+# @app.route('/web_worker')
+# def web_worker_client(): return render_template('web_worker.html')
 
 @app.route('/admin')
 @limiter.limit("5 per minute") # [FIX] Rate limit login attempts
@@ -345,47 +345,57 @@ def download_source(filename):
 @requires_worker_auth # [FIX] Auth Required
 def get_job():
     max_size_mb = request.args.get('max_size_mb')
-    
-    # [NEW] Handle Series ID Logic
     series_id = request.args.get('series_id')
-    folder_filter = None
     
+    # Define search passes:
+    # 1. First try the specific series requested (if any)
+    # 2. If that returns nothing, try the "General" queue (None)
+    search_attempts = []
     if series_id and series_id.isdigit():
-        series_list = get_series_list()
-        # Find the folder corresponding to the ID
-        for s in series_list:
-            if s['id'] == int(series_id):
-                folder_filter = s['folder']
-                break
-    
-    params = []
-    query_parts = ["status='queued'"]
-
-    # Filter by Size
-    if max_size_mb and max_size_mb.isdigit():
-        limit_bytes = int(max_size_mb) * 1024 * 1024
-        query_parts.append("file_size <= ?")
-        params.append(limit_bytes)
-        
-    # [NEW] Apply Folder Filter from ID
-    if folder_filter:
-        query_parts.append("id LIKE ?")
-        # Matches 'SeriesName/%' or 'SeriesName'
-        params.append(f"{folder_filter}%")
+        search_attempts.append(series_id)
+    search_attempts.append(None) # Fallback
 
     try:
         with db_lock:
             conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
             
-            # [CHANGED] ORDER BY id ASC (Path Sort)
-            where_clause = " AND ".join(query_parts)
-            sql = f"SELECT id, filename, file_size FROM jobs WHERE {where_clause} ORDER BY id ASC LIMIT 1"
+            job = None
             
-            c.execute(sql, tuple(params))
-            row = c.fetchone()
+            for current_search_id in search_attempts:
+                # Resolve ID to Folder
+                folder_filter = None
+                if current_search_id:
+                    series_list = get_series_list()
+                    for s in series_list:
+                        if s['id'] == int(current_search_id):
+                            folder_filter = s['folder']
+                            break
+                
+                # Build Query
+                params = []
+                query_parts = ["status='queued'"]
+
+                if max_size_mb and max_size_mb.isdigit():
+                    limit_bytes = int(max_size_mb) * 1024 * 1024
+                    query_parts.append("file_size <= ?")
+                    params.append(limit_bytes)
+                    
+                if folder_filter:
+                    query_parts.append("id LIKE ?")
+                    params.append(f"{folder_filter}%")
+                
+                where_clause = " AND ".join(query_parts)
+                sql = f"SELECT id, filename, file_size FROM jobs WHERE {where_clause} ORDER BY id ASC LIMIT 1"
+                
+                c.execute(sql, tuple(params))
+                row = c.fetchone()
+                
+                if row:
+                    job = dict(row)
+                    break # Found a job, stop searching
             
-            if row:
-                job = dict(row)
+            # If we found a job (either specific or fallback)
+            if job:
                 job['download_url'] = f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(job['id'], safe='/')}"
                 conn.execute("UPDATE jobs SET status='processing', last_updated=?, started_at=? WHERE id=?", (datetime.now(), datetime.now(), job['id']))
                 conn.commit(); conn.close()
