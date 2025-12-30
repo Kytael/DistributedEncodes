@@ -171,7 +171,6 @@ async function processJob(job) {
         const args = [
             '-threads', '4', 
             '-v', 'verbose',
-            '-strict', '-2',
             '-i', inputPath,
             '-c:v', 'libsvtav1',
             '-preset', '2',
@@ -183,6 +182,7 @@ async function processJob(job) {
             '-c:a', 'opus',
             '-b:a', '12k',
             '-ac', '1',
+            '-strict', '-2',
             '-c:s', 'mov_text',
             outputPath
         ];
