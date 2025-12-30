@@ -519,10 +519,17 @@ def maintenance_loop():
         except Exception as e: print(f"[!] Maintenance error: {e}")
         time.sleep(600)
 
+# ==============================================================================
+# APP INITIALIZATION
+# ==============================================================================
+
+# [FIX] Run these immediately when the file is loaded (Gunicorn Friendly)
+print("[*] Initializing Database and Queue...")
+init_db()
+scan_and_queue()
+threading.Thread(target=maintenance_loop, daemon=True).start()
+
 if __name__ == '__main__':
     print(f"[*] Manager running at {SERVER_URL_DISPLAY}")
     print("[!] WARNING: Running in dev mode. Use 'gunicorn manager:app' for production.")
-    init_db()
-    scan_and_queue()
-    threading.Thread(target=maintenance_loop, daemon=True).start()
     app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
