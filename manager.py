@@ -523,7 +523,10 @@ def maintenance_loop():
                     
                     if started:
                         try:
-                            s_time = datetime.strptime(started, "%Y-%m-%d %H:%M:%S.%f")
+                            if "." in started:
+                                s_time = datetime.strptime(started, "%Y-%m-%d %H:%M:%S.%f")
+                            else:
+                                s_time = datetime.strptime(started, "%Y-%m-%d %H:%M:%S")
                             if (now - s_time).total_seconds() > 86400: # 24 hours
                                 reset = True
                                 # Queue the log message instead of writing it immediately
@@ -544,7 +547,10 @@ def maintenance_loop():
                     
                     if last_up:
                         try:
-                            l_time = datetime.strptime(last_up, "%Y-%m-%d %H:%M:%S.%f")
+                            if "." in last_up:
+                                l_time = datetime.strptime(last_up, "%Y-%m-%d %H:%M:%S.%f")
+                            else:
+                                l_time = datetime.strptime(last_up, "%Y-%m-%d %H:%M:%S")
                             if (now - l_time).total_seconds() > 7200: # 2 hours
                                 reset = True
                                 # Queue the log message
@@ -553,7 +559,9 @@ def maintenance_loop():
                     
                     if reset:
                         cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
-                        job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(jid, safe='/')}"})
+                        if jid not in queued_job_ids:
+                             job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(jid, safe='/')}"})
+                             queued_job_ids.add(jid)
                 
                 conn.commit()
                 conn.close()
@@ -574,4 +582,3 @@ if __name__ == '__main__':
     scan_and_queue()
     threading.Thread(target=maintenance_loop, daemon=True).start()
     app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
-
