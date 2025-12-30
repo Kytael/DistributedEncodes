@@ -295,7 +295,7 @@
                 }[tag]));
         }
 
-        // [NEW] Load Series Map for ID Reference
+        // [MODIFIED] Load Series Map - Cleaner Display
         async function loadSeries() {
             try {
                 const res = await fetch('/api/series');
@@ -304,7 +304,6 @@
                     `<tr>
                         <td style="color:var(--neon-purple); font-weight:bold; width:50px;">ID: ${s.id}</td>
                         <td style="color:var(--text-light);">${escapeHTML(s.name)}</td>
-                        <td style="font-size:0.8em; color:var(--text-dim); text-align:right;">${escapeHTML(s.folder)}</td>
                     </tr>`
                 ).join('');
                 document.getElementById('series-table').innerHTML = html || '<tr><td>No Series Found</td></tr>';
