@@ -49,22 +49,13 @@ queued_job_ids = set() # Track IDs in queue to prevent duplicates
 db_lock = threading.Lock()
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024 
 
-# --- WEB WORKER CONFIGURATION (CRITICAL) ---
-# These headers are strictly required for Raw Emscripten WASM 
-# to use SharedArrayBuffer without security errors.
-
-@app.after_request
-def add_security_headers(response):
-    response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
-    response.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
-    return response
-
-@app.route('/web_worker')
-def web_worker_client():
-    """Serves the in-browser worker page."""
-    return render_template('web_worker.html')
-
 # --- SECURITY HELPERS ---
+
+def sanitize_input(val):
+    """Allow only safe characters: A-Z, a-z, 0-9, -, _"""
+    if not val: return None
+    return re.sub(r'[^a-zA-Z0-9_-]', '', str(val))
+
 def check_auth(username, password):
     return username == ADMIN_USER and password == ADMIN_PASS
 
@@ -82,6 +73,21 @@ def requires_auth(f):
             return authenticate()
         return f(*args, **kwargs)
     return decorated
+
+# --- WEB WORKER CONFIGURATION (CRITICAL) ---
+# These headers are strictly required for Raw Emscripten WASM 
+# to use SharedArrayBuffer without security errors.
+
+@app.after_request
+def add_security_headers(response):
+    response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
+    response.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
+    return response
+
+@app.route('/web_worker')
+def web_worker_client():
+    """Serves the in-browser worker page."""
+    return render_template('web_worker.html')
 
 def init_db():
     with db_lock:
@@ -335,7 +341,8 @@ def get_job():
 @app.route('/upload_result', methods=['POST'])
 def upload_result():
     job_id = request.form.get('job_id')
-    worker_id = request.form.get('worker_id')
+    # [FIX] Sanitize input
+    worker_id = sanitize_input(request.form.get('worker_id'))
     duration = request.form.get('duration', 0)
 
     if 'file' in request.files and job_id:
@@ -389,6 +396,9 @@ def upload_result():
 def report_status():
     d = request.json
     status = d.get('status')
+    # [FIX] Sanitize worker_id
+    raw_worker_id = d.get('worker_id')
+    clean_worker_id = sanitize_input(raw_worker_id)
     
     # Security: Prevent workers from marking jobs as completed directly
     if status == 'completed':
@@ -396,12 +406,18 @@ def report_status():
     
     # [NEW] Log failures reported by workers
     if status == 'failed':
-        log_event("ERROR", f"Worker {d.get('worker_id')} reported failure on job", d.get('job_id'))
+        log_event("ERROR", f"Worker {clean_worker_id} reported failure on job", d.get('job_id'))
 
     with db_lock:
         conn = sqlite3.connect(DB_FILE)
-        sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=? WHERE id=?"; params = [status, d.get('worker_id'), d.get('progress',0), datetime.now(), d.get('job_id')]
-        if d.get('duration', 0) > 0: sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=?, duration=? WHERE id=?"; params.insert(4, d.get('duration'))
+        sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=? WHERE id=?"
+        # Use clean_worker_id here
+        params = [status, clean_worker_id, d.get('progress',0), datetime.now(), d.get('job_id')]
+        
+        if d.get('duration', 0) > 0: 
+            sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=?, duration=? WHERE id=?"
+            params.insert(4, d.get('duration'))
+            
         conn.execute(sql, tuple(params)); conn.commit(); conn.close()
     return jsonify({"status": "received"})
 
