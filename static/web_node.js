@@ -171,6 +171,7 @@ async function processJob(job) {
         const args = [
             '-threads', '4', 
             '-v', 'verbose',
+            '-strict', '-2',
             '-i', inputPath,
             '-c:v', 'libsvtav1',
             '-preset', '2',
@@ -179,7 +180,7 @@ async function processJob(job) {
             '-pix_fmt', 'yuv420p', 
             '-svtav1-params', 'tune=0',
             '-vf', 'scale=-2:480',
-            '-c:a', 'libopus',
+            '-c:a', 'opus',
             '-b:a', '12k',
             '-ac', '1',
             '-c:s', 'mov_text',
