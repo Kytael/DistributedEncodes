@@ -20,7 +20,7 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.3.0" # Bumped version for Series Filtering
+WORKER_VERSION = "1.4.0" # Bumped version for Numeric Series ID
 
 # [FIX] Read Secret from Environment (injected by install script)
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
@@ -95,7 +95,6 @@ def toggle_processes(suspend=True):
             if proc.poll() is None:
                 try:
                     if platform.system() == 'Windows':
-                        # Windows suspend logic omitted for brevity
                         pass 
                     else:
                         sig = signal.SIGSTOP if suspend else signal.SIGCONT
@@ -219,7 +218,7 @@ def verify_connection(manager_url):
 # WORKER LOGIC
 # ==============================================================================
 
-def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_filter=None):
+def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=None):
     global UPDATE_AVAILABLE
     log(worker_id, "Thread active.")
     os.makedirs(temp_dir, exist_ok=True)
@@ -244,9 +243,9 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_filt
                 UPDATE_AVAILABLE = True; SHUTDOWN_EVENT.set(); break
 
             try: 
-                # [CHANGED] Pass Series Filter to Manager
+                # [CHANGED] Pass Series ID to Manager
                 params = {}
-                if series_filter: params['series'] = series_filter
+                if series_id: params['series_id'] = series_id
                 
                 r = requests.get(f"{manager_url}/get_job", params=params, headers=get_auth_headers(), timeout=10)
             except: time.sleep(5); continue
@@ -443,16 +442,16 @@ def run_worker(args):
     single_mode = (num_jobs == 1)
     
     # [NEW] Series Filter Log
-    if args.series:
-        print(f"[*] SERIES FILTER ACTIVE: Only processing jobs matching '{args.series}'")
+    if args.series_id:
+        print(f"[*] SERIES ID ACTIVE: Processing Series #{args.series_id}")
     
     for i in range(num_jobs):
         worker_id = f"{username}-{base_workername}-{i+1}"
         worker_ids.append(worker_id)
         temp_dir = f"./temp_encode_{base_workername}_{i+1}"
         
-        # [CHANGED] Pass Series Filter
-        t = threading.Thread(target=worker_task, args=(worker_id, manager_url, temp_dir, single_mode, args.series))
+        # [CHANGED] Pass Series ID
+        t = threading.Thread(target=worker_task, args=(worker_id, manager_url, temp_dir, single_mode, args.series_id))
         t.daemon = True
         t.start()
         threads.append(t)
@@ -514,6 +513,6 @@ if __name__ == "__main__":
     parser.add_argument("--username", default=DEFAULT_USERNAME)
     parser.add_argument("--workername", default=DEFAULT_WORKERNAME)
     parser.add_argument("--jobs", type=int, default=1)
-    parser.add_argument("--series", default="", help="Only process jobs from this folder name") # [NEW] Argument
+    parser.add_argument("--series-id", default=None, help="Process only specific Series ID") # [NEW]
     args = parser.parse_args()
     run_worker(args)
