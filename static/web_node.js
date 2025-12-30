@@ -6,7 +6,8 @@ const basePath = self.location.href.substring(0, self.location.href.lastIndexOf(
 
 // Create a blob that injects the noFSInit flag for pthreads
 const ffmpegWorkerScript = `
-var Module = { noFSInit: true };
+var Module = self.Module || {};
+Module.noFSInit = true;
 importScripts('${basePath}/ffmpeg.js?v=${Date.now()}');
 `;
 const ffmpegWorkerBlob = new Blob([ffmpegWorkerScript], { type: 'application/javascript' });
