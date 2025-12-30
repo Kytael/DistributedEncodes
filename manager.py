@@ -276,6 +276,11 @@ def install_script():
     # [FIX] Sanitize inputs
     u = sanitize_input(request.args.get('username')) or 'Anonymous'
     w = sanitize_input(request.args.get('workername')) or 'LinuxNode'
+    s = request.args.get('series', '') # [NEW] Install with Series Filter
+    
+    # Sanitize Series (Allow spaces/slashes for folders)
+    if s: s = re.sub(r'[^a-zA-Z0-9 _\-/]', '', s)
+    
     j = request.args.get('jobs', '1')
     if not j.isdigit(): j = '1'
 
@@ -290,7 +295,7 @@ curl -s "{SERVER_URL_DISPLAY.rstrip('/')}/dl/worker" -o worker.py
 echo "[*] Starting Worker..."
 # Auto-injecting the token from server configuration
 export WORKER_SECRET="{WORKER_SECRET}"
-python3 worker.py --username "{u}" --workername "{w}" --jobs {j} --manager "{SERVER_URL_DISPLAY}"
+python3 worker.py --username "{u}" --workername "{w}" --jobs {j} --manager "{SERVER_URL_DISPLAY}" --series "{s}"
 """
     return Response(script, mimetype='text/x-shellscript')
 
@@ -302,45 +307,47 @@ def download_source(filename):
 @requires_worker_auth # [FIX] Auth Required
 def get_job():
     max_size_mb = request.args.get('max_size_mb')
+    series_filter = request.args.get('series') # [NEW] Series Filter
+    
+    params = []
+    query_parts = ["status='queued'"]
 
-    # Filtered Mode
+    # Filter by Size
     if max_size_mb and max_size_mb.isdigit():
         limit_bytes = int(max_size_mb) * 1024 * 1024
-        try:
-            with db_lock:
-                conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
-                c.execute("SELECT id, filename, file_size FROM jobs WHERE status='queued' AND file_size <= ? ORDER BY last_updated ASC LIMIT 1", (limit_bytes,))
-                row = c.fetchone()
-                if row:
-                    job = dict(row)
-                    job['download_url'] = f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(job['id'], safe='/')}"
-                    conn.execute("UPDATE jobs SET status='processing', last_updated=?, started_at=? WHERE id=?", (datetime.now(), datetime.now(), job['id']))
-                    conn.commit(); conn.close()
-                    return jsonify({"status": "ok", "job": job})
-                conn.close(); return jsonify({"status": "empty"})
-        except Exception as e:
-            return jsonify({"status": "error"}), 500
+        query_parts.append("file_size <= ?")
+        params.append(limit_bytes)
+        
+    # [NEW] Filter by Series (Folder Name)
+    if series_filter:
+        query_parts.append("id LIKE ?")
+        # Matches 'SeriesName/%' or just 'SeriesName' if it's a file
+        params.append(f"{series_filter}%")
 
-    # FIFO Mode
     try:
-        start_time = time.time()
-        while True:
-            if time.time() - start_time > 5: return jsonify({"status": "empty"})
-            try: job = job_queue.get_nowait()
-            except queue.Empty: return jsonify({"status": "empty"})
+        with db_lock:
+            conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
+            
+            # [CHANGED] ORDER BY id ASC (Path Sort)
+            # This ensures Series A/Season 1 comes before Series A/Season 2
+            where_clause = " AND ".join(query_parts)
+            sql = f"SELECT id, filename, file_size FROM jobs WHERE {where_clause} ORDER BY id ASC LIMIT 1"
+            
+            c.execute(sql, tuple(params))
+            row = c.fetchone()
+            
+            if row:
+                job = dict(row)
+                job['download_url'] = f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(job['id'], safe='/')}"
+                conn.execute("UPDATE jobs SET status='processing', last_updated=?, started_at=? WHERE id=?", (datetime.now(), datetime.now(), job['id']))
+                conn.commit(); conn.close()
+                return jsonify({"status": "ok", "job": job})
+            
+            conn.close()
+            return jsonify({"status": "empty"})
 
-            with db_lock:
-                conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
-                cursor.execute("SELECT status FROM jobs WHERE id=?", (job['id'],))
-                row = cursor.fetchone()
-                if row and row[0] == 'queued':
-                    cursor.execute("UPDATE jobs SET status='processing', last_updated=?, started_at=? WHERE id=?", (datetime.now(), datetime.now(), job['id']))
-                    conn.commit(); conn.close()
-                    queued_job_ids.discard(job['id'])
-                    return jsonify({"status": "ok", "job": job})
-                else:
-                    conn.close(); queued_job_ids.discard(job['id']); continue
     except Exception as e:
+        log_event("ERROR", f"get_job failed: {e}")
         return jsonify({"status": "error"}), 500
 
 @app.route('/upload_result', methods=['POST'])
@@ -431,10 +438,22 @@ def api_stats():
         
         c.execute("SELECT id, status, worker_id FROM jobs ORDER BY last_updated DESC LIMIT 20")
         hist = [dict(r) for r in c.fetchall()]
-        c.execute("SELECT COUNT(*) FROM jobs"); total_count = c.fetchone()[0]
+        
+        # [CHANGED] Real Queue Depth (Count DB rows instead of memory queue)
+        c.execute("SELECT COUNT(*) FROM jobs WHERE status='queued'")
+        queue_depth = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM jobs")
+        total_count = c.fetchone()[0]
         conn.close()
     
-    return jsonify({"scoreboard": sb, "active": act, "history": hist, "queue_depth": job_queue.qsize(), "total_jobs": total_count})
+    return jsonify({
+        "scoreboard": sb, 
+        "active": act, 
+        "history": hist,
+        "queue_depth": queue_depth,
+        "total_jobs": total_count
+    })
 
 @app.route('/api/all_jobs')
 @requires_auth
@@ -467,11 +486,7 @@ def admin_action():
             c.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         elif action == 'retry':
             c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=? WHERE id=?", (datetime.now(), job_id))
-            c.execute("SELECT filename FROM jobs WHERE id=?", (job_id,))
-            row = c.fetchone()
-            if row and job_id not in queued_job_ids:
-                 job_queue.put({"id": job_id, "filename": row[0], "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(job_id, safe='/')}"})
-                 queued_job_ids.add(job_id)
+            # No need to push to memory queue anymore
         conn.commit(); conn.close()
     return jsonify({"status": "ok"})
 
@@ -508,9 +523,6 @@ def maintenance_loop():
                             if (now - s_time).total_seconds() > 86400:
                                 logs_to_write.append(("WARN", "Job timed out (24h). Resetting.", jid))
                                 cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
-                                if jid not in queued_job_ids:
-                                     job_queue.put({"id": jid, "filename": fname, "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(jid, safe='/')}"})
-                                     queued_job_ids.add(jid)
                         except: pass 
                 
                 conn.commit(); conn.close()
@@ -524,7 +536,7 @@ def maintenance_loop():
 # ==============================================================================
 
 # [FIX] Run these immediately when the file is loaded (Gunicorn Friendly)
-print("[*] Initializing Database and Queue...")
+print("[*] Initializing Database...")
 init_db()
 scan_and_queue()
 threading.Thread(target=maintenance_loop, daemon=True).start()
