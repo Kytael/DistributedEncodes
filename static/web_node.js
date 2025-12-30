@@ -4,12 +4,22 @@
 // Calculate base path for loading assets
 const basePath = self.location.href.substring(0, self.location.href.lastIndexOf('/'));
 
-// Create a blob that injects the noFSInit flag for pthreads
+// Create a blob that injects the Smart Mount patch for pthreads
 const ffmpegWorkerScript = `
 self.Module = self.Module || {};
-self.Module.noFSInit = true;
-// Debug log to confirm pthread injection
-console.log("Pthread Proxy Blob running. noFSInit set.");
+self.Module.preRun = self.Module.preRun || [];
+self.Module.preRun.push(function() {
+    // Smart Mount Patch: Allow FS.init() to run (create /dev etc) but prevent wiping root
+    const FS = self.FS;
+    const originalMount = FS.mount;
+    FS.mount = function(type, opts, mountpoint) {
+        if (mountpoint === '/' && type === FS.filesystems.MEMFS) {
+            console.log("Ignored FS.mount('/', MEMFS) in worker to preserve file visibility.");
+            return;
+        }
+        return originalMount(type, opts, mountpoint);
+    };
+});
 importScripts('${basePath}/ffmpeg.js?v=${Date.now()}');
 `;
 const ffmpegWorkerBlob = new Blob([ffmpegWorkerScript], { type: 'application/javascript' });
@@ -26,7 +36,7 @@ self.Module = {
             postMessage({type: 'log', level: 'err', msg: "Runtime initialized but FS missing."});
         }
     },
-    // CRITICAL: Point Pthreads to our proxy blob that sets noFSInit
+    // CRITICAL: Point Pthreads to our proxy blob
     mainScriptUrlOrBlob: ffmpegWorkerUrl,
     // Since we are using a blob, we must tell Emscripten where to find the WASM file
     locateFile: function(path, scriptDirectory) {
@@ -37,8 +47,18 @@ self.Module = {
     },
     noInitialRun: true,
     noExitRuntime: true,
-    // Prevent FS re-initialization which wipes our input file
-    noFSInit: true,
+    preRun: [function() {
+        // Smart Mount Patch for Main Thread
+        const FS = self.FS;
+        const originalMount = FS.mount;
+        FS.mount = function(type, opts, mountpoint) {
+            if (mountpoint === '/' && type === FS.filesystems.MEMFS) {
+                console.log("Ignored FS.mount('/', MEMFS) in main thread to preserve file visibility.");
+                return;
+            }
+            return originalMount(type, opts, mountpoint);
+        };
+    }],
 };
 
 // Load FFmpeg WASM
