@@ -21,28 +21,32 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
 # ==============================================================================
-# CONFIGURATION & SECRETS
+# CONFIGURATION
 # ==============================================================================
 
-# [FIX] Load secrets from Environment Variables (Priority) or config.py (Fallback)
 try:
     from config import (
         SERVER_HOST, SERVER_PORT, SERVER_URL_DISPLAY,
         SOURCE_DIRECTORY, COMPLETED_DIRECTORY, WORKER_TEMPLATE_FILE,
         DB_FILE, VIDEO_EXTENSIONS, 
-        ADMIN_USER as CONF_USER, ADMIN_PASS as CONF_PASS
+        ADMIN_USER, ADMIN_PASS
     )
-except ImportError:
-    # Defaults if config.py is missing (though it should exist for paths)
-    SERVER_HOST = "0.0.0.0"
-    SERVER_PORT = 5000
-    DB_FILE = "fractum.db"
     
-# Secrets Management
-ADMIN_USER = os.environ.get("ADMIN_USER", locals().get("CONF_USER", "admin"))
-ADMIN_PASS = os.environ.get("ADMIN_PASS", locals().get("CONF_PASS", "ChangeMe!"))
-WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret") # [FIX] New Worker Token
-SECRET_KEY = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+    # [FIX] Load new secrets from config.py, with fallbacks if you haven't added them yet
+    try:
+        from config import WORKER_SECRET
+    except ImportError:
+        print("[!] WARNING: WORKER_SECRET not found in config.py. Using unsafe default.")
+        WORKER_SECRET = "DefaultInsecureSecret"
+
+    try:
+        from config import SECRET_KEY
+    except ImportError:
+        SECRET_KEY = secrets.token_hex(32)
+
+except ImportError:
+    print("[!] Critical Error: config.py not found.")
+    exit(1)
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
@@ -100,7 +104,6 @@ def csrf_protect():
     if request.method == "POST" and request.path.startswith('/api/admin_action'):
         # Check Origin/Referer
         origin = request.headers.get('Origin')
-        referer = request.headers.get('Referer')
         
         # Allow if origin matches our server (simplified check)
         if origin and SERVER_HOST not in origin and 'localhost' not in origin:
@@ -131,8 +134,7 @@ def requires_worker_auth(f):
         # Check header or query param
         token = request.headers.get('X-Worker-Token') or request.args.get('token')
         if token != WORKER_SECRET:
-            # Allow legacy/install scripts for now but warn? 
-            # For strict security, return 401:
+            # For strict security, return 401
             return jsonify({"status": "error", "message": "Unauthorized Worker"}), 401
         return f(*args, **kwargs)
     return decorated
@@ -278,7 +280,7 @@ if [ -x "$(command -v dnf)" ]; then sudo dnf install -y ffmpeg python3 python3-r
 curl -s "{SERVER_URL_DISPLAY.rstrip('/')}/dl/worker" -o worker.py
 
 echo "[*] Starting Worker..."
-# Auto-injecting the token from server environment
+# Auto-injecting the token from server configuration
 export WORKER_SECRET="{WORKER_SECRET}"
 python3 worker.py --username "{u}" --workername "{w}" --jobs {j} --manager "{SERVER_URL_DISPLAY}"
 """
