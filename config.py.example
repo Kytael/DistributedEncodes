@@ -4,10 +4,14 @@ SERVER_HOST = '0.0.0.0'
 SERVER_PORT = 5000
 SERVER_URL_DISPLAY = "https://encode.fractumseraph.net/"
 ADMIN_USER = "admin"
-ADMIN_PASS = "changeme"  # CHANGE THIS IN PRODUCTION
+ADMIN_PASS = "changeme"  # CHANGE THIS!
 
 SOURCE_DIRECTORY = "./source_media"
 COMPLETED_DIRECTORY = "./completed_media"
 WORKER_TEMPLATE_FILE = "worker_template.py"
 DB_FILE = "encoding_jobs.db"
 VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov')
+
+
+WORKER_SECRET = "ChangeThisToALongRandomString"  # The API key from the old version of anyone still has that code somewhere
+SECRET_KEY = "ChangeThisToAnotherRandomString"
