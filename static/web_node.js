@@ -4,6 +4,14 @@
 // Calculate base path for loading assets
 const basePath = self.location.href.substring(0, self.location.href.lastIndexOf('/'));
 
+// Create a blob that injects the noFSInit flag for pthreads
+const ffmpegWorkerScript = `
+var Module = { noFSInit: true };
+importScripts('${basePath}/ffmpeg.js?v=${Date.now()}');
+`;
+const ffmpegWorkerBlob = new Blob([ffmpegWorkerScript], { type: 'application/javascript' });
+const ffmpegWorkerUrl = URL.createObjectURL(ffmpegWorkerBlob);
+
 self.Module = {
     print: function(text) { postMessage({type: 'log', level: 'sys', msg: "STDOUT: " + text}); },
     printErr: function(text) { postMessage({type: 'log', level: 'err', msg: "STDERR: " + text}); },
@@ -15,9 +23,15 @@ self.Module = {
             postMessage({type: 'log', level: 'err', msg: "Runtime initialized but FS missing."});
         }
     },
-    // CRITICAL: Point Pthreads to the actual Emscripten JS file, NOT this worker wrapper.
-    // Otherwise, Pthreads import web_node.js -> import ffmpeg.js -> infinite loop or broken context.
-    mainScriptUrlOrBlob: basePath + "/ffmpeg.js",
+    // CRITICAL: Point Pthreads to our proxy blob that sets noFSInit
+    mainScriptUrlOrBlob: ffmpegWorkerUrl,
+    // Since we are using a blob, we must tell Emscripten where to find the WASM file
+    locateFile: function(path, scriptDirectory) {
+        if (path.endsWith('.wasm')) {
+            return basePath + "/ffmpeg.wasm";
+        }
+        return scriptDirectory + path;
+    },
     noInitialRun: true,
     noExitRuntime: true,
     // Prevent FS re-initialization which wipes our input file
