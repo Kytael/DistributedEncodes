@@ -313,6 +313,19 @@
 
         function fmtTime(m) { return m < 60 ? Math.floor(m)+"m" : (m/60).toFixed(1)+"h"; }
         
+        // [FIX] Sanitization function to prevent XSS
+        function escapeHTML(str) {
+            if (!str) return "";
+            return str.replace(/[&<>'"]/g, 
+                tag => ({
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    "'": '&#39;',
+                    '"': '&quot;'
+                }[tag]));
+        }
+
         function setFilter(val) {
             currentFilter = val;
             document.querySelectorAll('.filters button').forEach(b => b.classList.remove('active'));
@@ -360,22 +373,22 @@
                 lb.innerHTML = data.users.length ? data.users.map((u,i) => 
                     `<tr>
                         <td style="width: 40px; color:var(--text-dim)">#${i+1}</td>
-                        <td style="font-weight:bold; color:var(--text-light)">${u.name}</td>
+                        <td style="font-weight:bold; color:var(--text-light)">${escapeHTML(u.name)}</td>
                         <td style="text-align:right; color:var(--neon-purple)">${fmtTime(u.time)}</td>
                     </tr>`
                 ).join('') : '<tr><td colspan="3" style="text-align:center; color:var(--text-dim); padding:20px;">// NO DATA //</td></tr>';
                 
                 const act = document.getElementById('active-list');
                 act.innerHTML = data.active.length ? data.active.map(j => {
-                    const cleanName = j.file.split('/').pop(); // Handle full paths if necessary
+                    const cleanName = j.file.split('/').pop(); 
                     const pct = j.progress || 0;
                     return `
                     <div class="job-item">
                         <div class="job-header">
-                            <div class="job-user">${j.user}</div>
+                            <div class="job-user">${escapeHTML(j.user)}</div>
                             <div class="job-percent">${pct}%</div>
                         </div>
-                        <div class="job-file" title="${cleanName}">${cleanName}</div>
+                        <div class="job-file" title="${escapeHTML(cleanName)}">${escapeHTML(cleanName)}</div>
                         <div class="progress-bg"><div class="progress-fill" style="width: ${pct}%"></div></div>
                     </div>`;
                 }).join('') : '<div style="color:var(--text-dim); padding:10px;">// SYSTEM IDLE</div>';
