@@ -211,11 +211,6 @@
         </div>
         
         <div class="grid">
-            <div class="card" style="max-height: 400px; overflow-y: auto;">
-                <div class="card-header"><h3>>> SERIES_MAP</h3></div>
-                <table id="series-table"><tbody><tr><td>Loading...</td></tr></tbody></table>
-            </div>
-
             <div class="card">
                 <div class="card-header">
                     <h3>>> LEADERBOARD</h3>
@@ -260,6 +255,14 @@
                 <div style="text-align: center; margin-top: 30px;">
                     <a href="/dl/worker" target="_blank" class="modal-btn">DOWNLOAD WORKER.PY</a>
                 </div>
+
+                <div style="margin-top: 30px; border-top: 1px dashed var(--neon-purple); padding-top: 20px;">
+                    <span class="os-title" style="color: var(--text-light);">:: AVAILABLE SERIES IDs</span>
+                    <p style="font-size:0.8em; color:#888; margin-bottom:10px;">Use these IDs with the <code>--series-id</code> flag.</p>
+                    <div style="max-height: 150px; overflow-y: auto; background:rgba(255,255,255,0.05); padding:10px; border:1px solid #333;">
+                        <table id="series-table" style="width:100%;"><tbody><tr><td>Loading...</td></tr></tbody></table>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -295,7 +298,7 @@
                 }[tag]));
         }
 
-        // [MODIFIED] Load Series Map - Cleaner Display
+        // Load Series Map
         async function loadSeries() {
             try {
                 const res = await fetch('/api/series');
