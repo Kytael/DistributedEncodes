@@ -20,9 +20,9 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.4.0" # Bumped version for Numeric Series ID
+WORKER_VERSION = "1.5.0" # Bumped version for Manual Secret Support
 
-# [FIX] Read Secret from Environment (injected by install script)
+# [FIX] Read Secret from Environment OR Argument
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 
 # --- UPDATE COORDINATION ---
@@ -42,7 +42,7 @@ ACTIVE_PROCS = {}
 PROC_LOCK = threading.Lock()
 
 # ==============================================================================
-# ENCODING CONFIGURATION
+# ENCODING CONFIGURATION (DO NOT CHANGE)
 # ==============================================================================
 ENCODING_CONFIG = {
     "VIDEO_CODEC": "libsvtav1",
@@ -62,11 +62,11 @@ ENCODING_CONFIG = {
 # ==============================================================================
 
 def get_auth_headers():
-    """[FIX] Add Security Token to all requests"""
-    return {
-        'User-Agent': f'FractumWorker/{WORKER_VERSION}',
-        'X-Worker-Token': WORKER_SECRET
-    }
+    """[FIX] Add Security Token to all requests if available"""
+    headers = {'User-Agent': f'FractumWorker/{WORKER_VERSION}'}
+    if WORKER_SECRET:
+        headers['X-Worker-Token'] = WORKER_SECRET
+    return headers
 
 def get_term_width():
     try: return shutil.get_terminal_size((80, 20)).columns
@@ -253,7 +253,7 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
             data = r.json() if r.status_code == 200 else None
             
             if r.status_code == 401:
-                log(worker_id, "AUTH FAILED: Worker Secret is invalid.", "CRITICAL")
+                log(worker_id, "AUTH FAILED: Worker Secret is invalid or missing.", "CRITICAL")
                 SHUTDOWN_EVENT.set(); break
 
             if data and data.get("status") == "ok":
@@ -424,11 +424,13 @@ def run_worker(args):
     username = args.username or DEFAULT_USERNAME
     base_workername = args.workername or DEFAULT_WORKERNAME
     
-    # [FIX] Ensure WORKER_SECRET is available
-    if not WORKER_SECRET:
-        print("[!] ERROR: WORKER_SECRET not set. Please reinstall using the manager's install command.")
-        sys.exit(1)
+    # [FIX] Overwrite env secret if argument provided
+    global WORKER_SECRET
+    if args.secret: WORKER_SECRET = args.secret
 
+    if not WORKER_SECRET:
+        print("[!] WARNING: WORKER_SECRET not set. Attempting legacy connection...")
+    
     if not verify_connection(manager_url): sys.exit(1)
     if check_version(manager_url): apply_update(manager_url)
     
@@ -441,7 +443,6 @@ def run_worker(args):
     worker_ids = []
     single_mode = (num_jobs == 1)
     
-    # [NEW] Series Filter Log
     if args.series_id:
         print(f"[*] SERIES ID ACTIVE: Processing Series #{args.series_id}")
     
@@ -450,7 +451,6 @@ def run_worker(args):
         worker_ids.append(worker_id)
         temp_dir = f"./temp_encode_{base_workername}_{i+1}"
         
-        # [CHANGED] Pass Series ID
         t = threading.Thread(target=worker_task, args=(worker_id, manager_url, temp_dir, single_mode, args.series_id))
         t.daemon = True
         t.start()
@@ -513,6 +513,7 @@ if __name__ == "__main__":
     parser.add_argument("--username", default=DEFAULT_USERNAME)
     parser.add_argument("--workername", default=DEFAULT_WORKERNAME)
     parser.add_argument("--jobs", type=int, default=1)
-    parser.add_argument("--series-id", default=None, help="Process only specific Series ID") # [NEW]
+    parser.add_argument("--series-id", default=None, help="Process only specific Series ID")
+    parser.add_argument("--secret", default=None, help="Manually set worker secret token") # [NEW]
     args = parser.parse_args()
     run_worker(args)
