@@ -6,68 +6,199 @@
     <title>FRACTUM :: ADMIN</title>
     <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
-        :root { --bg-dark: #000000; --neon-purple: #cc00ff; --neon-pink: #ff00aa; --neon-green: #00ff41; --neon-red: #ff3333; --text-light: #e0e0e0; --text-dim: #888888; --font: 'Roboto Mono', monospace; }
+        :root {
+            --bg-dark: #000000;
+            --bg-panel: #0a0a0a;
+            --neon-purple: #cc00ff;
+            --neon-pink: #ff00aa;
+            --neon-green: #00ff41;
+            --neon-red: #ff3333;
+            --text-light: #e0e0e0;
+            --text-dim: #888888;
+            --font: 'Roboto Mono', monospace;
+        }
+        
         *, *::before, *::after { box-sizing: border-box; }
-        body { background-color: var(--bg-dark); color: var(--text-light); font-family: var(--font); padding: 20px; margin: 0; background-image: linear-gradient(to right, rgba(204,0,255,0.05) 1px, transparent 1px), linear-gradient(to bottom, rgba(204,0,255,0.05) 1px, transparent 1px); background-size: 25px 25px; }
-        .dashboard-container { max-width: 1200px; width: 100%; margin: 0 auto; border: 2px solid var(--neon-purple); background-color: rgba(10, 10, 10, 0.9); box-shadow: 0 0 15px var(--neon-purple), inset 0 0 10px rgba(204,0,255,0.2); padding: 25px; border-radius: 5px; }
-        .header-container { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; border-bottom: 1px dashed var(--neon-purple); padding-bottom: 15px; flex-wrap: wrap; gap: 20px; }
+        
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            font-family: var(--font);
+            padding: 20px;
+            margin: 0;
+            background-image: 
+                linear-gradient(to right, rgba(204,0,255,0.05) 1px, transparent 1px),
+                linear-gradient(to bottom, rgba(204,0,255,0.05) 1px, transparent 1px);
+            background-size: 25px 25px;
+        }
+
+        .dashboard-container {
+            max-width: 1200px;
+            width: 100%;
+            margin: 0 auto;
+            border: 2px solid var(--neon-purple);
+            background-color: rgba(10, 10, 10, 0.9);
+            box-shadow: 0 0 15px var(--neon-purple), inset 0 0 10px rgba(204,0,255,0.2);
+            padding: 25px;
+            border-radius: 5px;
+        }
+        
+        /* Header */
+        .header-container { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 30px; 
+            border-bottom: 1px dashed var(--neon-purple);
+            padding-bottom: 15px;
+            flex-wrap: wrap; 
+            gap: 20px; 
+        }
         .header-title-group { display: flex; flex-direction: column; }
-        .back-link { color: var(--text-dim); text-decoration: none; font-size: 0.8em; margin-bottom: 5px; transition: color 0.2s; }
+        .back-link {
+            color: var(--text-dim);
+            text-decoration: none;
+            font-size: 0.8em;
+            margin-bottom: 5px;
+            transition: color 0.2s;
+        }
         .back-link:hover { color: var(--neon-pink); text-shadow: 0 0 5px var(--neon-pink); }
-        h1 { color: var(--neon-pink); text-transform: uppercase; letter-spacing: 2px; text-shadow: 0 0 8px var(--neon-pink); margin: 0; font-size: 1.8em; word-break: break-word; }
-        .card { background: rgba(0,0,0,0.3); border: 1px solid var(--neon-pink); padding: 20px; box-shadow: 0 0 8px rgba(255,0,170,0.2); overflow-x: auto; }
-        .card-header { border-bottom: 1px dashed var(--neon-pink); padding-bottom: 10px; margin-bottom: 15px; }
-        .card h3 { margin: 0; padding: 0; color: var(--neon-pink); font-size: 1.2em; text-shadow: 0 0 5px var(--neon-pink); }
+        h1 { 
+            color: var(--neon-pink); 
+            text-transform: uppercase; 
+            letter-spacing: 2px; 
+            text-shadow: 0 0 8px var(--neon-pink); 
+            margin: 0; 
+            font-size: 1.8em;
+            word-break: break-word; 
+        }
+
+        /* Cards */
+        .card { 
+            background: rgba(0,0,0,0.3); 
+            border: 1px solid var(--neon-pink); 
+            padding: 20px; 
+            box-shadow: 0 0 8px rgba(255,0,170,0.2);
+            overflow-x: auto; 
+            margin-bottom: 25px;
+        }
+        .card-header { 
+            border-bottom: 1px dashed var(--neon-pink); 
+            padding-bottom: 10px; 
+            margin-bottom: 15px; 
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .card h3 { 
+            margin: 0; padding: 0; color: var(--neon-pink); font-size: 1.2em; text-shadow: 0 0 5px var(--neon-pink);
+        }
+        
         table { width: 100%; border-collapse: collapse; font-size: 0.9em; table-layout: fixed; }
         td, th { padding: 10px 5px; border-bottom: 1px dotted rgba(204,0,255,0.3); text-align: left; vertical-align: middle; }
         th { color: var(--neon-purple); text-transform: uppercase; letter-spacing: 1px; }
         tr:last-child td { border-bottom: none; }
-        @keyframes pulse { from { opacity: 0.7; } to { opacity: 1; } }
+        
+        /* Colors */
         .status-failed { color: var(--neon-red); text-shadow: 0 0 5px var(--neon-red); font-weight: bold; }
         .status-completed { color: var(--neon-green); text-shadow: 0 0 5px var(--neon-green); }
         .status-queued { color: var(--text-dim); }
-        .status-processing { color: var(--neon-pink); animation: pulse 1.5s infinite alternate; }
-        .status-downloading { color: var(--neon-purple); animation: pulse 1.5s infinite alternate; }
-        .status-uploading { color: var(--neon-green); animation: pulse 0.5s infinite alternate; }
-        button { background: transparent; border: 1px solid var(--text-dim); color: var(--text-light); padding: 5px 10px; cursor: pointer; font-family: var(--font); font-size: 0.8em; text-transform: uppercase; transition: all 0.2s; margin-right: 5px; }
+        
+        /* Buttons */
+        button { 
+            background: transparent; 
+            border: 1px solid var(--text-dim); 
+            color: var(--text-light); 
+            padding: 5px 10px; 
+            cursor: pointer; 
+            font-family: var(--font); 
+            font-size: 0.8em;
+            text-transform: uppercase;
+            transition: all 0.2s; 
+            margin-right: 5px;
+        }
         button:hover { box-shadow: 0 0 8px currentColor; }
+        
         .btn-retry { border-color: var(--neon-green); color: var(--neon-green); }
-        .btn-retry:hover { background: rgba(0,255,65,0.1); }
         .btn-delete { border-color: var(--neon-red); color: var(--neon-red); }
-        .btn-delete:hover { background: rgba(255,51,51,0.1); }
+        
+        /* [NEW] Filter Controls */
+        .controls { display: flex; gap: 5px; }
+        .filter-active { border-color: var(--neon-purple); color: var(--neon-purple); font-weight: bold; background: rgba(204,0,255,0.1); }
+        
         .file-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 300px; display: block; }
     </style>
     <script>
-        // [FIX] Sanitization function to prevent XSS
+        // Store jobs globally for instant filtering
+        let allJobs = [];
+        let currentFilter = 'all'; 
+
+        // [FIX] Sanitization
         function escapeHTML(str) {
             if (!str) return "";
             return str.replace(/[&<>'"]/g, 
-                tag => ({
-                    '&': '&amp;',
-                    '<': '&lt;',
-                    '>': '&gt;',
-                    "'": '&#39;',
-                    '"': '&quot;'
-                }[tag]));
+                tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag]));
         }
 
         function loadJobs() {
             fetch('/api/all_jobs').then(r => r.json()).then(data => {
-                let html = "";
-                data.jobs.forEach(j => {
-                    const cleanName = j.id.split('/').pop();
-                    // [FIX] Using data attribute for safer ID handling
-                    html += `<tr>
-                        <td><span class="file-name" title="${escapeHTML(j.id)}">${escapeHTML(cleanName)}</span></td>
-                        <td class="status-${j.status}">${j.status.toUpperCase()}</td>
-                        <td>
-                            ${(j.status === 'failed' || j.status === 'completed') ? `<button class="btn-retry" onclick="act(this.getAttribute('data-id'),'retry')" data-id="${escapeHTML(j.id)}">[ RETRY ]</button>` : ''}
-                            <button class="btn-delete" onclick="act(this.getAttribute('data-id'),'delete')" data-id="${escapeHTML(j.id)}">[ DELETE ]</button>
-                        </td>
-                    </tr>`;
-                });
-                document.getElementById('list').innerHTML = html || '<tr><td colspan="3" style="text-align:center; padding:20px; color:var(--text-dim);">// NO JOBS FOUND //</td></tr>';
+                allJobs = data.jobs;
+                renderJobs();
             });
+        }
+
+        // [NEW] Local Rendering & Filtering
+        function renderJobs() {
+            const tbody = document.getElementById('list');
+            let filtered = allJobs;
+
+            if (currentFilter === 'failed') {
+                filtered = allJobs.filter(j => j.status === 'failed');
+            } else if (currentFilter === 'active') {
+                filtered = allJobs.filter(j => j.status !== 'completed' && j.status !== 'failed');
+            } else if (currentFilter === 'no-completed') {
+                filtered = allJobs.filter(j => j.status !== 'completed');
+            }
+
+            if (filtered.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:20px; color:var(--text-dim);">// NO JOBS MATCH FILTER //</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = filtered.map(j => {
+                const cleanName = j.id.split('/').pop();
+                return `<tr>
+                    <td><span class="file-name" title="${escapeHTML(j.id)}">${escapeHTML(cleanName)}</span></td>
+                    <td class="status-${j.status}">${j.status.toUpperCase()}</td>
+                    <td>
+                        ${(j.status === 'failed' || j.status === 'completed') ? 
+                            `<button class="btn-retry" onclick="act(this.getAttribute('data-id'),'retry')" data-id="${escapeHTML(j.id)}">[ RETRY ]</button>` : ''}
+                        <button class="btn-delete" onclick="act(this.getAttribute('data-id'),'delete')" data-id="${escapeHTML(j.id)}">[ DELETE ]</button>
+                    </td>
+                </tr>`;
+            }).join('');
+        }
+
+        // [NEW] Filter logic
+        function setFilter(type) {
+            currentFilter = type;
+            // Update button styles
+            document.querySelectorAll('.controls button.filter-btn').forEach(b => b.classList.remove('filter-active'));
+            document.getElementById('btn-' + type).classList.add('filter-active');
+            renderJobs();
+        }
+
+        // [NEW] Collapse logic
+        function toggleRegistry() {
+            const el = document.getElementById('registry-content');
+            const btn = document.getElementById('btn-collapse');
+            if (el.style.display === 'none') {
+                el.style.display = 'block';
+                btn.innerText = '[ _ ]';
+            } else {
+                el.style.display = 'none';
+                btn.innerText = '[ + ]';
+            }
         }
         
         function loadLogs() {
@@ -78,13 +209,18 @@
                     if(l.level === 'ERROR' || l.level === 'CRITICAL') color = 'var(--neon-red)';
                     if(l.level === 'WARN') color = '#ffaa00';
                     if(l.level === 'INFO') color = 'var(--neon-green)';
-                    html += `<tr><td style="color:var(--text-dim); font-size:0.8em; white-space:nowrap;">${l.timestamp}</td><td style="color:${color}; font-weight:bold">${l.level}</td><td style="word-break: break-all;">${escapeHTML(l.message)}</td><td style="font-family:monospace; font-size:0.8em; color:var(--text-dim);">${escapeHTML(l.related_id) || '-'}</td></tr>`;
+                    
+                    html += `<tr>
+                        <td style="color:var(--text-dim); font-size:0.8em; white-space:nowrap;">${l.timestamp}</td>
+                        <td style="color:${color}; font-weight:bold">${l.level}</td>
+                        <td style="word-break: break-all;">${escapeHTML(l.message)}</td>
+                        <td style="font-family:monospace; font-size:0.8em; color:var(--text-dim);">${escapeHTML(l.related_id) || '-'}</td>
+                    </tr>`;
                 });
                 document.getElementById('log-list').innerHTML = html || '<tr><td colspan="4" style="text-align:center; padding:20px; color:var(--text-dim);">// NO LOGS FOUND //</td></tr>';
             });
         }
 
-        // [FIX] Improved Action Handler with Error Reporting
         function act(id, action) {
             if(confirm("CONFIRM ACTION: " + action.toUpperCase() + "\nTarget: " + id)) {
                 fetch('/api/admin_action', {
@@ -93,9 +229,7 @@
                     body:JSON.stringify({job_id:id, action:action})
                 })
                 .then(res => {
-                    if (!res.ok) {
-                        return res.json().then(d => alert("Error: " + d.message));
-                    }
+                    if (!res.ok) return res.json().then(d => alert("Error: " + d.message));
                     loadJobs();
                 })
                 .catch(err => alert("Network Error: " + err));
@@ -137,8 +271,15 @@
         <div class="card">
             <div class="card-header">
                 <h3>>> JOB_REGISTRY</h3>
+                <div class="controls">
+                    <button id="btn-all" class="filter-btn filter-active" onclick="setFilter('all')">ALL</button>
+                    <button id="btn-no-completed" class="filter-btn" onclick="setFilter('no-completed')">HIDE COMPLETED</button>
+                    <button id="btn-failed" class="filter-btn" onclick="setFilter('failed')" style="border-color:var(--neon-red); color:var(--neon-red);">FAILED</button>
+                    <button id="btn-collapse" onclick="toggleRegistry()">[ _ ]</button>
+                </div>
             </div>
-            <div style="overflow-x: auto;">
+            
+            <div id="registry-content" style="overflow-x: auto;">
                 <table>
                     <thead>
                         <tr>
