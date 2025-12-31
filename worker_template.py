@@ -20,9 +20,9 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.7.1" 
+WORKER_VERSION = "1.7.1" # Bumped for Windows Font Fix
 
-WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
+WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 
 SHUTDOWN_EVENT = threading.Event()
 UPDATE_AVAILABLE = False
@@ -35,12 +35,25 @@ PAUSE_REQUESTED = False
 ACTIVE_PROCS = {}
 PROC_LOCK = threading.Lock()
 
+# [FIX] Detect OS to handle Fonts correctly for Watermark
+# Windows needs an explicit path to a font file. Linux usually finds one automatically.
+FONT_FILE = ""
+if platform.system() == "Windows":
+    # Common Windows font path with FFmpeg escaping
+    FONT_FILE = ":fontfile='C\:\\Windows\\Fonts\\arial.ttf'" 
+else:
+    # Linux (Android/Docker) uses fontconfig
+    FONT_FILE = "" 
+
 ENCODING_CONFIG = {
     "VIDEO_CODEC": "libsvtav1",
     "VIDEO_PRESET": "2",
     "VIDEO_CRF": "63",           
     "VIDEO_PIX_FMT": "yuv420p",
-    "VIDEO_SCALE": "scale=-2:480,drawtext=text='@FractumSeraph':fontcolor=white@0.2:fontsize=12:x=10:y=h-th-10",
+    
+    # [FIXED] Watermark now includes the OS-specific font file path if needed
+    "VIDEO_SCALE": f"scale=-2:480,drawtext=text='@FractumSeraph'{FONT_FILE}:fontcolor=white@0.2:fontsize=12:x=10:y=h-th-10",
+    
     "AUDIO_CODEC": "libopus",
     "AUDIO_BITRATE": "12k",      
     "AUDIO_CHANNELS": "1",       
