@@ -134,7 +134,6 @@ def requires_worker_auth(f):
 # ==============================================================================
 
 def init_db():
-    # [CHANGE] Added timeout to all connections
     with db_lock:
         conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
@@ -168,8 +167,7 @@ def log_event(level, message, related_id=None):
         clean_msg = str(message).replace('<', '&lt;').replace('>', '&gt;')
         clean_id = sanitize_input(related_id) if related_id else None
         
-        # [CHANGE] Use a new connection for every log to avoid deadlocks
-        # Do NOT use db_lock here if we can avoid it, rely on SQLite's internal locking
+        # Use a new connection for every log to avoid deadlocks
         with sqlite3.connect(DB_FILE, timeout=10) as conn:
             conn.execute("INSERT INTO system_logs (timestamp, level, message, related_id) VALUES (?, ?, ?, ?)",
                          (datetime.now(), level, clean_msg, clean_id))
@@ -396,7 +394,12 @@ def get_job():
 def upload_result():
     job_id = request.form.get('job_id')
     worker_id = sanitize_input(request.form.get('worker_id'))
-    duration = request.form.get('duration', 0)
+    
+    # [FIX] Capture duration from the upload request
+    try:
+        duration = int(float(request.form.get('duration', 0)))
+    except:
+        duration = 0
 
     if 'file' in request.files and job_id:
         base_name, _ = os.path.splitext(job_id)
@@ -442,7 +445,8 @@ def upload_result():
 
         with db_lock:
             conn = sqlite3.connect(DB_FILE, timeout=30)
-            conn.execute("UPDATE jobs SET status='completed', progress=100, worker_id=?, last_updated=? WHERE id=?", (worker_id, datetime.now(), job_id))
+            # [FIX] Added 'duration' to the UPDATE query
+            conn.execute("UPDATE jobs SET status='completed', progress=100, worker_id=?, last_updated=?, duration=? WHERE id=?", (worker_id, datetime.now(), duration, job_id))
             conn.commit(); conn.close()
             
         log_event("INFO", f"Job completed by {worker_id}", job_id)
@@ -511,7 +515,8 @@ def api_stats():
 
     with db_lock:
         conn = sqlite3.connect(DB_FILE, timeout=30); conn.row_factory = sqlite3.Row; c = conn.cursor()
-        c.execute(f"SELECT CASE WHEN instr(worker_id, '-') > 0 THEN substr(worker_id, 1, instr(worker_id, '-') - 1) ELSE worker_id END as worker_id, SUM(duration) as total_minutes, COUNT(*) as files_count FROM jobs WHERE status='completed' AND worker_id IS NOT NULL {time_filter} GROUP BY 1 ORDER BY total_minutes DESC")
+        # [FIX] Added HAVING clause to hide 0m users
+        c.execute(f"SELECT CASE WHEN instr(worker_id, '-') > 0 THEN substr(worker_id, 1, instr(worker_id, '-') - 1) ELSE worker_id END as worker_id, SUM(duration) as total_minutes, COUNT(*) as files_count FROM jobs WHERE status='completed' AND worker_id IS NOT NULL {time_filter} GROUP BY 1 HAVING total_minutes > 0 ORDER BY total_minutes DESC")
         sb = [dict(r) for r in c.fetchall()]
         
         c.execute("SELECT COALESCE(worker_id, 'Pending...') as worker_id, filename, duration, progress, status FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
@@ -588,7 +593,7 @@ def admin_action():
 @requires_auth
 def api_rescan():
     try:
-        # [CHANGE] Rescan must happen in a thread now to avoid blocking the response
+        # Rescan must happen in a thread now to avoid blocking the response
         threading.Thread(target=scan_and_queue, daemon=True).start()
         return jsonify({"status": "ok", "message": "Rescan initiated in background."})
     except Exception as e:
@@ -600,7 +605,7 @@ def handle_exception(e):
     log_event("CRITICAL", f"Unhandled Exception: {str(e)}\n{traceback.format_exc()}")
     return "Internal Server Error", 500
 
-# [CHANGE] Unified Background Thread orchestrator
+# Unified Background Thread orchestrator
 def background_orchestrator():
     print("[*] Background thread started. Initializing DB...")
     init_db()
@@ -655,7 +660,7 @@ def background_orchestrator():
 # APP INITIALIZATION
 # ==============================================================================
 
-# [CHANGE] We only trigger this once. Gunicorn loads the app, we start the thread.
+# We only trigger this once. Gunicorn loads the app, we start the thread.
 # This thread handles DB init, Scanning, and Maintenance.
 threading.Thread(target=background_orchestrator, daemon=True).start()
 
