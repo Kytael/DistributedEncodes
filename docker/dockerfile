@@ -6,9 +6,10 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Verify AV1 support because not all version of ffmpeg support it.
+# Verify AV1 support because not all versions of ffmpeg support it.
 RUN ffmpeg -encoders | grep libsvtav1
 
 WORKDIR /app
 RUN pip install requests
-ENTRYPOINT ["/bin/sh", "-c", "curl -s -o worker.py https://encode.fractumseraph.net/dl/worker && python worker.py \"$@\"", "--"]
+
+ENTRYPOINT ["/bin/sh", "-c", "curl -fsSL -o worker.py https://encode.fractumseraph.net/dl/worker && exec python worker.py \"$@\"", "--"]
