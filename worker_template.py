@@ -20,30 +20,21 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.5.0" # Bumped version for Manual Secret Support
+WORKER_VERSION = "1.6.0" # Bumped version for Detailed Reporting
 
-# [FIX] Read Secret from Environment OR Argument
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 
-# --- UPDATE COORDINATION ---
 SHUTDOWN_EVENT = threading.Event()
 UPDATE_AVAILABLE = False
 LAST_UPDATE_CHECK = 0
 CHECK_LOCK = threading.Lock()
-
-# --- CONSOLE MANAGEMENT ---
 CONSOLE_LOCK = threading.Lock()
 PROGRESS_LOCK = threading.Lock()
 WORKER_PROGRESS = {} 
 PAUSE_REQUESTED = False
-
-# --- PROCESS MANAGEMENT ---
 ACTIVE_PROCS = {}
 PROC_LOCK = threading.Lock()
 
-# ==============================================================================
-# ENCODING CONFIGURATION (DO NOT CHANGE)
-# ==============================================================================
 ENCODING_CONFIG = {
     "VIDEO_CODEC": "libsvtav1",
     "VIDEO_PRESET": "2",
@@ -62,7 +53,6 @@ ENCODING_CONFIG = {
 # ==============================================================================
 
 def get_auth_headers():
-    """[FIX] Add Security Token to all requests if available"""
     headers = {'User-Agent': f'FractumWorker/{WORKER_VERSION}'}
     if WORKER_SECRET:
         headers['X-Worker-Token'] = WORKER_SECRET
@@ -94,8 +84,7 @@ def toggle_processes(suspend=True):
         for wid, proc in ACTIVE_PROCS.items():
             if proc.poll() is None:
                 try:
-                    if platform.system() == 'Windows':
-                        pass 
+                    if platform.system() == 'Windows': pass 
                     else:
                         sig = signal.SIGSTOP if suspend else signal.SIGCONT
                         os.kill(proc.pid, sig)
@@ -105,8 +94,7 @@ def kill_processes():
     with PROC_LOCK:
         for wid, proc in ACTIVE_PROCS.items():
             try:
-                if proc.poll() is None:
-                    proc.kill()
+                if proc.poll() is None: proc.kill()
             except: pass
 
 def check_version(manager_url):
@@ -142,17 +130,13 @@ def print_progress(worker_id, current, total, prefix='', suffix=''):
     if total <= 0: return
     percent = 100 * (current / float(total))
     if percent > 100: percent = 100
-    
     width = get_term_width()
     overhead = 12 + len(worker_id) + len(prefix) + 10 + len(suffix)
     bar_length = width - overhead - 5
     if bar_length < 10: bar_length = 10
-    
     filled_length = int(bar_length * current // total)
     bar = '█' * filled_length + '-' * (bar_length - filled_length)
-    
     line = f'[{datetime.now().strftime("%H:%M:%S")}] [{worker_id}] {prefix} |{bar}| {percent:.1f}% {suffix}'
-    
     with CONSOLE_LOCK:
         if len(line) > width: line = line[:width-1]
         sys.stdout.write('\033[2K\r' + line)
@@ -163,7 +147,6 @@ def monitor_status_loop(worker_ids):
     while not SHUTDOWN_EVENT.is_set():
         if PAUSE_REQUESTED:
              time.sleep(0.5); continue
-
         parts = []
         with PROGRESS_LOCK:
             for wid in sorted(worker_ids, key=lambda x: x.split('-')[-1]):
@@ -187,23 +170,19 @@ def get_seconds(t):
         return h*3600 + m*60 + s
     except: return 0
 
-# --- FFMPEG ---
 def check_ffmpeg():
     def has_svtav1():
         try:
             res = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             return "libsvtav1" in res.stdout
         except: return False
-    
     if shutil.which("ffmpeg") and shutil.which("ffprobe"):
         if has_svtav1(): return
         print("[!] FFmpeg found but missing libsvtav1 support.")
-    
     if platform.system() != 'Windows':
         print("[!] Attempting to install ffmpeg...")
         try: subprocess.run(["sudo", "apt-get", "install", "-y", "ffmpeg"], check=False)
         except: pass
-
     if not (shutil.which("ffmpeg") and has_svtav1()):
         print("[!] FFmpeg missing or incompatible. Please install FFmpeg with libsvtav1.")
         sys.exit(1)
@@ -226,10 +205,11 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
     def update_status(msg):
         with PROGRESS_LOCK: WORKER_PROGRESS[worker_id] = msg
         
-    def post_status(status, progress=0, duration=0):
+    def post_status(status, progress=0, duration=0, error_msg=None):
         try:
             payload = {"worker_id":worker_id, "job_id":job_id, "status":status, "progress":progress}
             if duration > 0: payload["duration"] = duration
+            if error_msg: payload["error"] = error_msg
             requests.post(f"{manager_url}/report_status", json=payload, headers=get_auth_headers(), timeout=10)
         except: pass
 
@@ -243,10 +223,8 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
                 UPDATE_AVAILABLE = True; SHUTDOWN_EVENT.set(); break
 
             try: 
-                # [CHANGED] Pass Series ID to Manager
                 params = {}
                 if series_id: params['series_id'] = series_id
-                
                 r = requests.get(f"{manager_url}/get_job", params=params, headers=get_auth_headers(), timeout=10)
             except: time.sleep(5); continue
 
@@ -263,7 +241,6 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
                 local_src = os.path.join(temp_dir, "source.tmp")
                 local_dst = os.path.join(temp_dir, f"encoded{ENCODING_CONFIG['OUTPUT_EXT']}")
                 
-                # --- DOWNLOAD ---
                 post_status("downloading", 0)
                 
                 try:
@@ -289,11 +266,11 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
                                     last_rep = time.time()
                     if single_mode: print_progress(worker_id, total_size, total_size, prefix='DL', suffix='OK')
                 except Exception as e:
-                    log(worker_id, f"Download failed: {e}", "ERROR")
-                    post_status("failed")
+                    err_msg = str(e)
+                    log(worker_id, f"Download failed: {err_msg}", "ERROR")
+                    post_status("failed", error_msg=err_msg)
                     time.sleep(5); continue
 
-                # --- PROBE ---
                 update_status("Probing")
                 total_sec = 0; total_min = 0; audio_index = 0; subtitle_indices = []
                 try:
@@ -315,7 +292,6 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
                                 subtitle_indices.append(s['index'])
                 except: pass
 
-                # --- ENCODE ---
                 log(worker_id, f"Encoding ({total_min}m)...")
                 post_status("processing", 0, total_min)
                 
@@ -367,7 +343,6 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
                     log(worker_id, f"Encode done ({enc_time:.0f}s, {final_size:.2f}MB). Uploading...")
                     post_status("uploading", 0)
                     
-                    # --- UPLOAD ---
                     class ProgressFileReader:
                         def __init__(self, filename, callback):
                             self._f = open(filename, 'rb'); self._total = os.path.getsize(filename)
@@ -389,7 +364,6 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
                     def upload_cb(pct): post_status("uploading", pct)
 
                     with ProgressFileReader(local_dst, upload_cb) as f:
-                        # [FIX] Added auth headers
                         requests.post(f"{manager_url}/upload_result", 
                                       files={'file': (job_id, f)}, 
                                       data={'job_id': job_id, 'worker_id': worker_id, 'duration': total_min},
@@ -398,9 +372,11 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
                     if single_mode: print_progress(worker_id, 100, 100, prefix='Up', suffix='OK')
                     log(worker_id, "Job complete.")
                 else:
-                    if SHUTDOWN_EVENT.is_set() and proc.returncode != 0: log(worker_id, "Aborted.", "WARN")
-                    else: log(worker_id, f"FFmpeg failed (RC: {proc.returncode})", "ERROR")
-                    post_status("failed")
+                    err_msg = f"FFmpeg exited with code {proc.returncode}"
+                    if SHUTDOWN_EVENT.is_set(): err_msg = "Aborted by user/update"
+                    
+                    log(worker_id, err_msg, "ERROR")
+                    post_status("failed", error_msg=err_msg)
 
                 if os.path.exists(local_src): os.remove(local_src)
                 if os.path.exists(local_dst): os.remove(local_dst)
@@ -411,7 +387,11 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
                         sys.stdout.flush()
                 time.sleep(10)
         except Exception as e:
-            log(worker_id, f"Error: {e}", "CRITICAL")
+            err_str = str(e)
+            log(worker_id, f"Error: {err_str}", "CRITICAL")
+            try: 
+                if 'job_id' in locals(): post_status("failed", error_msg=err_str)
+            except: pass
             time.sleep(10)
 
 def run_worker(args):
@@ -424,7 +404,6 @@ def run_worker(args):
     username = args.username or DEFAULT_USERNAME
     base_workername = args.workername or DEFAULT_WORKERNAME
     
-    # [FIX] Overwrite env secret if argument provided
     global WORKER_SECRET
     if args.secret: WORKER_SECRET = args.secret
 
@@ -514,6 +493,6 @@ if __name__ == "__main__":
     parser.add_argument("--workername", default=DEFAULT_WORKERNAME)
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--series-id", default=None, help="Process only specific Series ID")
-    parser.add_argument("--secret", default=None, help="Manually set worker secret token") # [NEW]
+    parser.add_argument("--secret", default=None, help="Manually set worker secret token")
     args = parser.parse_args()
     run_worker(args)
