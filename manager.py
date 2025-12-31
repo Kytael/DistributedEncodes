@@ -268,7 +268,8 @@ def get_series_list():
             try:
                 with open('series_names.json', 'r') as f:
                     mapping = json.load(f)
-            except: pass
+            except Exception as e: 
+                print(f"[!] Error loading series_names.json: {e}")
 
         # 3. Build Result List
         series_data = []
@@ -571,23 +572,45 @@ def maintenance_loop():
                 conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
                 now = datetime.now()
                 
-                # Rule 1: 24h timeout
-                cursor.execute("SELECT id, filename, started_at FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
+                # Fetch active jobs to check for timeouts
+                cursor.execute("SELECT id, filename, started_at, last_updated FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
                 for row in cursor.fetchall():
-                    jid, fname, started = row
+                    jid, fname, started, last_up = row
+                    reset_job = False
+                    reason = ""
+
+                    # Rule 1: Total Runtime > 24 Hours (The "Slow Device" Cap)
                     if started:
                         try:
                             s_time = datetime.strptime(str(started).split('.')[0], "%Y-%m-%d %H:%M:%S")
-                            if (now - s_time).total_seconds() > 86400:
-                                logs_to_write.append(("WARN", "Job timed out (24h). Resetting.", jid))
-                                cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
-                        except: pass 
+                            if (now - s_time).total_seconds() > 86400: # 24 hours
+                                reset_job = True
+                                reason = "Job timed out (24h limit)"
+                        except: pass
+
+                    # Rule 2: Heartbeat Timeout > 10 Minutes (The "Ghost Worker" Fix)
+                    if not reset_job and last_up:
+                        try:
+                            l_time = datetime.strptime(str(last_up).split('.')[0], "%Y-%m-%d %H:%M:%S")
+                            if (now - l_time).total_seconds() > 600: # 10 minutes
+                                reset_job = True
+                                reason = "Worker vanished (No heartbeat for 10m)"
+                        except: pass
+
+                    # Apply Reset
+                    if reset_job:
+                        logs_to_write.append(("WARN", f"{reason}. Re-queueing.", jid))
+                        cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
                 
                 conn.commit(); conn.close()
             
             for level, msg, jid in logs_to_write: log_event(level, msg, jid)
-        except Exception as e: print(f"[!] Maintenance error: {e}")
-        time.sleep(600)
+            
+        except Exception as e: 
+            print(f"[!] Maintenance error: {e}")
+        
+        # Run check every 2 minutes
+        time.sleep(120)
 
 # ==============================================================================
 # APP INITIALIZATION
