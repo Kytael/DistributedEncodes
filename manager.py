@@ -32,7 +32,6 @@ try:
         ADMIN_USER, ADMIN_PASS
     )
     
-    # [FIX] Load new secrets from config.py, with fallbacks if you haven't added them yet
     try:
         from config import WORKER_SECRET
     except ImportError:
@@ -52,9 +51,9 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
 # [FIX] Secure Cookie Configuration
-app.config['SESSION_COOKIE_SECURE'] = True    # Cookies only sent over HTTPS
-app.config['SESSION_COOKIE_HTTPONLY'] = True  # JS cannot access cookies
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax' # CSRF protection
+app.config['SESSION_COOKIE_SECURE'] = True    
+app.config['SESSION_COOKIE_HTTPONLY'] = True  
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax' 
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024 
 
 # [FIX] Initialize Rate Limiter
@@ -80,13 +79,11 @@ def sanitize_input(val):
 
 @app.after_request
 def add_security_headers(response):
-    """[FIX] Add CSP and Security Headers"""
     response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
     response.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     
-    # Content Security Policy
     csp = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
@@ -100,13 +97,11 @@ def add_security_headers(response):
 
 @app.before_request
 def csrf_protect():
-    """[FIX] Basic CSRF Protection for Admin API"""
     if request.method == "POST" and request.path.startswith('/api/admin_action'):
         origin = request.headers.get('Origin')
         referer = request.headers.get('Referer')
         target = origin or referer or ""
         
-        # [FIXED] Compare against request.host (the URL you typed) 
         if request.host not in target:
              return jsonify({"status": "error", "message": "CSRF Blocked: Origin Mismatch"}), 403
 
@@ -129,22 +124,12 @@ def requires_auth(f):
     return decorated
 
 def requires_worker_auth(f):
-    """[MODIFIED] Auth Middleware with TRANSITION MODE (Legacy Support)"""
     @wraps(f)
     def decorated(*args, **kwargs):
-        # Check header or query param
         token = request.headers.get('X-Worker-Token') or request.args.get('token')
-        
-        # --- TRANSITION MODE START ---
-        # If no token is provided, assume it's an old worker and ALLOW it.
-        if token is None:
-            return f(*args, **kwargs)
-        # --- TRANSITION MODE END ---
-
-        # If a token IS provided, it MUST be correct (blocks attackers guessing)
+        if token is None: return f(*args, **kwargs) # Transition Mode
         if token != WORKER_SECRET:
             return jsonify({"status": "error", "message": "Unauthorized Worker"}), 401
-            
         return f(*args, **kwargs)
     return decorated
 
@@ -178,10 +163,9 @@ def init_db():
 
 def log_event(level, message, related_id=None):
     try:
-        # [FIX] HTML Escape for Message (Preserves spaces/text but stops XSS)
-        clean_msg = str(message).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        
-        # [FIX] Strict Sanitize for ID (No spaces allowed)
+        # [FIX] Sanitize logs before writing to DB
+        # This prevents HTML injection when viewing logs in the dashboard
+        clean_msg = str(message).replace('<', '&lt;').replace('>', '&gt;')
         clean_id = sanitize_input(related_id) if related_id else None
         
         with db_lock:
@@ -256,15 +240,12 @@ def scan_and_queue():
             queued_job_ids.add(row[0])
     conn.close()
 
-# [NEW] Series Enumeration Helper
 def get_series_list():
     try:
-        # 1. Get folders from disk
         if not os.path.exists(SOURCE_DIRECTORY): return []
         folders = [d for d in os.listdir(SOURCE_DIRECTORY) if os.path.isdir(os.path.join(SOURCE_DIRECTORY, d))]
-        folders.sort() # Alphabetical Sort ensures ID 1 is always the same series (mostly)
+        folders.sort() 
 
-        # 2. Load Friendly Name Map
         mapping = {}
         if os.path.exists('series_names.json'):
             try:
@@ -273,16 +254,11 @@ def get_series_list():
             except Exception as e: 
                 print(f"[!] Error loading series_names.json: {e}")
 
-        # 3. Build Result List
         series_data = []
         for idx, folder in enumerate(folders):
             series_id = idx + 1
-            friendly = mapping.get(folder, folder) # Default to folder name if no mapping
-            series_data.append({
-                "id": series_id,
-                "folder": folder,
-                "name": friendly
-            })
+            friendly = mapping.get(folder, folder) 
+            series_data.append({"id": series_id, "folder": folder, "name": friendly})
         return series_data
     except Exception as e:
         print(f"[!] Error getting series list: {e}")
@@ -295,12 +271,8 @@ def get_series_list():
 @app.route('/')
 def dashboard(): return render_template('dashboard.html')
 
-# [REMOVED] Web Worker references for now
-# @app.route('/web_worker')
-# def web_worker_client(): return render_template('web_worker.html')
-
 @app.route('/admin')
-@limiter.limit("5 per minute") # [FIX] Rate limit login attempts
+@limiter.limit("5 per minute")
 @requires_auth
 def admin_panel(): return render_template('admin.html')
 
@@ -309,23 +281,17 @@ def download_worker_script(): return send_file(WORKER_TEMPLATE_FILE, as_attachme
 
 @app.route('/api/series')
 def api_series_list():
-    """[NEW] Returns the list of series with IDs for the Dashboard"""
     return jsonify({"series": get_series_list()})
 
 @app.route('/install')
 def install_script():
-    # [FIX] Sanitize inputs
     u = sanitize_input(request.args.get('username')) or 'Anonymous'
     w = sanitize_input(request.args.get('workername')) or 'LinuxNode'
-    
-    # [NEW] Handle Numeric Series ID
     s_id = request.args.get('series_id', '') 
-    if s_id and not s_id.isdigit(): s_id = '' # Security check
-    
+    if s_id and not s_id.isdigit(): s_id = '' 
     j = request.args.get('jobs', '1')
     if not j.isdigit(): j = '1'
 
-    # [FIX] Inject Token into install script
     script = f"""#!/bin/bash
 echo "[*] Initializing Worker..."
 if [ -x "$(command -v apt-get)" ]; then sudo apt-get update -qq && sudo apt-get install -y ffmpeg python3 python3-requests; fi
@@ -334,7 +300,6 @@ if [ -x "$(command -v dnf)" ]; then sudo dnf install -y ffmpeg python3 python3-r
 curl -s "{SERVER_URL_DISPLAY.rstrip('/')}/dl/worker" -o worker.py
 
 echo "[*] Starting Worker..."
-# Auto-injecting the token from server configuration
 export WORKER_SECRET="{WORKER_SECRET}"
 python3 worker.py --username "{u}" --workername "{w}" --jobs {j} --manager "{SERVER_URL_DISPLAY}" --series-id "{s_id}"
 """
@@ -345,14 +310,11 @@ def download_source(filename):
     return send_from_directory(SOURCE_DIRECTORY, filename, as_attachment=True)
 
 @app.route('/get_job', methods=['GET'])
-@requires_worker_auth # [FIX] Auth Required
+@requires_worker_auth
 def get_job():
     max_size_mb = request.args.get('max_size_mb')
     series_id = request.args.get('series_id')
     
-    # Define search passes:
-    # 1. First try the specific series requested (if any)
-    # 2. If that returns nothing, try the "General" queue (None)
     search_attempts = []
     if series_id and series_id.isdigit():
         search_attempts.append(series_id)
@@ -361,11 +323,8 @@ def get_job():
     try:
         with db_lock:
             conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
-            
             job = None
-            
             for current_search_id in search_attempts:
-                # Resolve ID to Folder
                 folder_filter = None
                 if current_search_id:
                     series_list = get_series_list()
@@ -374,30 +333,24 @@ def get_job():
                             folder_filter = s['folder']
                             break
                 
-                # Build Query
                 params = []
                 query_parts = ["status='queued'"]
-
                 if max_size_mb and max_size_mb.isdigit():
                     limit_bytes = int(max_size_mb) * 1024 * 1024
                     query_parts.append("file_size <= ?")
                     params.append(limit_bytes)
-                    
                 if folder_filter:
                     query_parts.append("id LIKE ?")
                     params.append(f"{folder_filter}%")
                 
                 where_clause = " AND ".join(query_parts)
                 sql = f"SELECT id, filename, file_size FROM jobs WHERE {where_clause} ORDER BY id ASC LIMIT 1"
-                
                 c.execute(sql, tuple(params))
                 row = c.fetchone()
-                
                 if row:
                     job = dict(row)
-                    break # Found a job, stop searching
+                    break
             
-            # If we found a job (either specific or fallback)
             if job:
                 job['download_url'] = f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(job['id'], safe='/')}"
                 conn.execute("UPDATE jobs SET status='processing', last_updated=?, started_at=? WHERE id=?", (datetime.now(), datetime.now(), job['id']))
@@ -406,51 +359,44 @@ def get_job():
             
             conn.close()
             return jsonify({"status": "empty"})
-
     except Exception as e:
         log_event("ERROR", f"get_job failed: {e}")
         return jsonify({"status": "error"}), 500
 
 @app.route('/upload_result', methods=['POST'])
-@requires_worker_auth # [FIX] Auth Required
+@requires_worker_auth
 def upload_result():
     job_id = request.form.get('job_id')
-    worker_id = sanitize_input(request.form.get('worker_id')) # [FIX] Sanitize
+    worker_id = sanitize_input(request.form.get('worker_id'))
     duration = request.form.get('duration', 0)
 
     if 'file' in request.files and job_id:
         base_name, _ = os.path.splitext(job_id)
         new_filename = base_name + ".mp4"
         
-        # [FIX] Quarantine Pattern
-        # 1. Save to temp folder first
         quarantine_dir = os.path.join("temp_uploads", "quarantine")
         os.makedirs(quarantine_dir, exist_ok=True)
         temp_name = f"{uuid.uuid4().hex}.mp4"
         temp_path = os.path.join(quarantine_dir, temp_name)
-        
         request.files['file'].save(temp_path)
         
-        # 2. Verify in isolation
         is_valid, reason = verify_upload(temp_path)
         if not is_valid:
             log_event("WARN", f"Security: Upload rejected ({reason})", job_id)
-            os.remove(temp_path) # Nuke it
+            os.remove(temp_path) 
             with db_lock:
                 conn = sqlite3.connect(DB_FILE)
                 conn.execute("UPDATE jobs SET status='failed', last_updated=? WHERE id=?", (datetime.now(), job_id))
                 conn.commit(); conn.close()
             return jsonify({"status": "error", "message": reason}), 400
 
-        # 3. Move to final destination (Safe)
         save_path = os.path.abspath(os.path.join(COMPLETED_DIRECTORY, new_filename))
-        completed_abs = os.path.abspath(COMPLETED_DIRECTORY)
-        if not save_path.startswith(completed_abs): # Path traversal check
+        if not save_path.startswith(os.path.abspath(COMPLETED_DIRECTORY)):
              os.remove(temp_path)
              return jsonify({"status": "error"}), 403
 
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        shutil.move(temp_path, save_path) # Atomic move
+        shutil.move(temp_path, save_path) 
 
         with db_lock:
             conn = sqlite3.connect(DB_FILE)
@@ -463,20 +409,19 @@ def upload_result():
     return jsonify({"status": "error"}), 400
 
 @app.route('/report_status', methods=['POST'])
-@requires_worker_auth # [FIX] Auth Required
+@requires_worker_auth
 def report_status():
     d = request.json
     status = d.get('status')
-    worker_id = sanitize_input(d.get('worker_id')) # [FIX] Sanitize
+    worker_id = sanitize_input(d.get('worker_id'))
     job_id = d.get('job_id')
     
     if status == 'completed': return jsonify({"status": "ignored"}), 403
     
-    # [NEW] Log the specific error message if provided
+    # [NEW] Log detailed error messages from worker
     if status == 'failed': 
-        # Escape HTML for safety, but don't strictly sanitize (keep spaces)
-        raw_error = str(d.get('error', 'Unknown Error'))
-        log_event("ERROR", f"Worker {worker_id} failed: {raw_error}", job_id)
+        error_msg = d.get('error', 'Unknown Error')
+        log_event("ERROR", f"Worker {worker_id} reported failure: {error_msg}", job_id)
 
     with db_lock:
         conn = sqlite3.connect(DB_FILE)
@@ -506,7 +451,6 @@ def api_stats():
         c.execute("SELECT id, status, worker_id FROM jobs ORDER BY last_updated DESC LIMIT 20")
         hist = [dict(r) for r in c.fetchall()]
         
-        # [CHANGED] Real Queue Depth (Count DB rows instead of memory queue)
         c.execute("SELECT COUNT(*) FROM jobs WHERE status='queued'")
         queue_depth = c.fetchone()[0]
 
@@ -527,7 +471,7 @@ def api_stats():
 def api_all_jobs():
     with db_lock:
         conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
-        # [FIX] Added worker_id to selection for Admin Filter
+        # [NEW] Added worker_id to result for admin filtering
         c.execute("SELECT id, status, worker_id FROM jobs ORDER BY last_updated DESC")
         jobs = [dict(r) for r in c.fetchall()]; conn.close()
         return jsonify({"jobs": jobs})
@@ -554,7 +498,6 @@ def admin_action():
             c.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         elif action == 'retry':
             c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=? WHERE id=?", (datetime.now(), job_id))
-            # No need to push to memory queue anymore
         conn.commit(); conn.close()
     return jsonify({"status": "ok"})
 
@@ -581,32 +524,30 @@ def maintenance_loop():
                 conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
                 now = datetime.now()
                 
-                # Fetch active jobs to check for timeouts
                 cursor.execute("SELECT id, filename, started_at, last_updated FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
                 for row in cursor.fetchall():
                     jid, fname, started, last_up = row
                     reset_job = False
                     reason = ""
 
-                    # Rule 1: Total Runtime > 24 Hours (The "Slow Device" Cap)
+                    # Rule 1: Total Runtime > 24 Hours
                     if started:
                         try:
                             s_time = datetime.strptime(str(started).split('.')[0], "%Y-%m-%d %H:%M:%S")
-                            if (now - s_time).total_seconds() > 86400: # 24 hours
+                            if (now - s_time).total_seconds() > 86400:
                                 reset_job = True
                                 reason = "Job timed out (24h limit)"
                         except: pass
 
-                    # Rule 2: Heartbeat Timeout > 10 Minutes (The "Ghost Worker" Fix)
+                    # Rule 2: Heartbeat Timeout > 10 Minutes
                     if not reset_job and last_up:
                         try:
                             l_time = datetime.strptime(str(last_up).split('.')[0], "%Y-%m-%d %H:%M:%S")
-                            if (now - l_time).total_seconds() > 600: # 10 minutes
+                            if (now - l_time).total_seconds() > 600:
                                 reset_job = True
                                 reason = "Worker vanished (No heartbeat for 10m)"
                         except: pass
 
-                    # Apply Reset
                     if reset_job:
                         logs_to_write.append(("WARN", f"{reason}. Re-queueing.", jid))
                         cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
@@ -617,15 +558,8 @@ def maintenance_loop():
             
         except Exception as e: 
             print(f"[!] Maintenance error: {e}")
-        
-        # Run check every 2 minutes
         time.sleep(120)
 
-# ==============================================================================
-# APP INITIALIZATION
-# ==============================================================================
-
-# [FIX] Run these immediately when the file is loaded (Gunicorn Friendly)
 print("[*] Initializing Database...")
 init_db()
 scan_and_queue()
