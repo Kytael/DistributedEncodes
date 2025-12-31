@@ -72,6 +72,7 @@
                 <h1>// SYSTEM_ADMIN</h1>
             </div>
             <div>
+                <button onclick="act('all','retry_all_failed')" style="border-color: var(--neon-red); color: var(--neon-red);">[ RESET FAILED ]</button>
                 <button onclick="rescanDB()" style="border-color: var(--neon-green); color: var(--neon-green);">[ SCAN FILES ]</button>
                 <button onclick="refreshAll()" style="border-color: var(--neon-purple); color: var(--neon-purple);">[ REFRESH DATA ]</button>
             </div>
@@ -252,7 +253,10 @@
         }
 
         function act(id, action) {
-            if(!confirm(`${action.toUpperCase()} job?`)) return;
+            let msg = `${action.toUpperCase()} job?`;
+            if (action === 'retry_all_failed') msg = "WARNING: This will reset ALL failed jobs. Confirm?";
+            
+            if(!confirm(msg)) return;
             fetch('/api/admin_action', {
                 method:'POST', headers:{'Content-Type':'application/json'},
                 body:JSON.stringify({job_id:id, action:action})
