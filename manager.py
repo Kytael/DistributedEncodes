@@ -10,7 +10,6 @@ import shutil
 import traceback
 import uuid
 import secrets
-import socket
 from functools import wraps
 from datetime import datetime
 from urllib.parse import quote
@@ -135,8 +134,9 @@ def requires_worker_auth(f):
 # ==============================================================================
 
 def init_db():
+    # [CHANGE] Added timeout to all connections
     with db_lock:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS jobs (
@@ -168,11 +168,11 @@ def log_event(level, message, related_id=None):
         clean_msg = str(message).replace('<', '&lt;').replace('>', '&gt;')
         clean_id = sanitize_input(related_id) if related_id else None
         
-        with db_lock:
-            conn = sqlite3.connect(DB_FILE)
+        # [CHANGE] Use a new connection for every log to avoid deadlocks
+        # Do NOT use db_lock here if we can avoid it, rely on SQLite's internal locking
+        with sqlite3.connect(DB_FILE, timeout=10) as conn:
             conn.execute("INSERT INTO system_logs (timestamp, level, message, related_id) VALUES (?, ?, ?, ?)",
                          (datetime.now(), level, clean_msg, clean_id))
-            conn.commit(); conn.close()
         print(f"[{level}] {message}") 
     except Exception as e:
         print(f"[!] Logging failed: {e}")
@@ -229,15 +229,15 @@ def scan_and_queue():
     print(f"[*] Scanning {SOURCE_DIRECTORY}...")
     if not os.path.exists(SOURCE_DIRECTORY): os.makedirs(SOURCE_DIRECTORY)
     
-    # [FIX] Add timeout to prevent lock hang on startup
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=10) 
+        conn = sqlite3.connect(DB_FILE, timeout=30) 
         cursor = conn.cursor()
     except sqlite3.OperationalError:
         print("[!] ERROR: Database is locked by another process.")
         return
     
     count_new = 0
+    # Walk the directory
     for root, dirs, files in os.walk(SOURCE_DIRECTORY, topdown=True):
         dirs.sort(); files.sort()
         for file in files:
@@ -350,7 +350,7 @@ def get_job():
 
     try:
         with db_lock:
-            conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
+            conn = sqlite3.connect(DB_FILE, timeout=30); conn.row_factory = sqlite3.Row; c = conn.cursor()
             job = None
             for current_search_id in search_attempts:
                 folder_filter = None
@@ -409,7 +409,7 @@ def upload_result():
         request.files['file'].save(temp_path)
         
         with db_lock:
-            conn = sqlite3.connect(DB_FILE)
+            conn = sqlite3.connect(DB_FILE, timeout=30)
             cursor = conn.cursor()
             cursor.execute("SELECT id FROM jobs WHERE id=?", (job_id,))
             row = cursor.fetchone()
@@ -427,7 +427,7 @@ def upload_result():
             log_event("WARN", f"Security: Upload rejected ({reason})", job_id)
             os.remove(temp_path) 
             with db_lock:
-                conn = sqlite3.connect(DB_FILE)
+                conn = sqlite3.connect(DB_FILE, timeout=30)
                 conn.execute("UPDATE jobs SET status='failed', last_updated=? WHERE id=?", (datetime.now(), job_id))
                 conn.commit(); conn.close()
             return jsonify({"status": "error", "message": reason}), 400
@@ -441,7 +441,7 @@ def upload_result():
         shutil.move(temp_path, save_path) 
 
         with db_lock:
-            conn = sqlite3.connect(DB_FILE)
+            conn = sqlite3.connect(DB_FILE, timeout=30)
             conn.execute("UPDATE jobs SET status='completed', progress=100, worker_id=?, last_updated=? WHERE id=?", (worker_id, datetime.now(), job_id))
             conn.commit(); conn.close()
             
@@ -461,11 +461,11 @@ def report_status():
 
     if status == 'completed': return jsonify({"status": "ignored"}), 403
 
-    # [FIX] Defer logging to prevent deadlock
+    # Defer logging to prevent deadlock
     logs_to_write = []
 
     with db_lock:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
 
         # [SMART RETRY LOGIC]
@@ -510,7 +510,7 @@ def api_stats():
     elif filter_val == '30d': time_filter = " AND last_updated > datetime('now', '-30 days')"
 
     with db_lock:
-        conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
+        conn = sqlite3.connect(DB_FILE, timeout=30); conn.row_factory = sqlite3.Row; c = conn.cursor()
         c.execute(f"SELECT CASE WHEN instr(worker_id, '-') > 0 THEN substr(worker_id, 1, instr(worker_id, '-') - 1) ELSE worker_id END as worker_id, SUM(duration) as total_minutes, COUNT(*) as files_count FROM jobs WHERE status='completed' AND worker_id IS NOT NULL {time_filter} GROUP BY 1 ORDER BY total_minutes DESC")
         sb = [dict(r) for r in c.fetchall()]
         
@@ -539,7 +539,7 @@ def api_stats():
 @requires_auth
 def api_all_jobs():
     with db_lock:
-        conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
+        conn = sqlite3.connect(DB_FILE, timeout=30); conn.row_factory = sqlite3.Row; c = conn.cursor()
         c.execute("SELECT id, status, worker_id FROM jobs ORDER BY last_updated DESC")
         jobs = [dict(r) for r in c.fetchall()]; conn.close()
         return jsonify({"jobs": jobs})
@@ -549,7 +549,7 @@ def api_all_jobs():
 def get_logs():
     limit = request.args.get('limit', 100)
     with db_lock:
-        conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
+        conn = sqlite3.connect(DB_FILE, timeout=30); conn.row_factory = sqlite3.Row; c = conn.cursor()
         c.execute("SELECT * FROM system_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
         logs = [dict(r) for r in c.fetchall()]; conn.close()
     return jsonify({"logs": logs})
@@ -559,11 +559,11 @@ def get_logs():
 def admin_action():
     data = request.json; job_id = data.get('job_id'); action = data.get('action')
     
-    # [FIX] Defer logging to prevent deadlock
+    # Defer logging to prevent deadlock
     log_payload = None
 
     with db_lock:
-        conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+        conn = sqlite3.connect(DB_FILE, timeout=30); c = conn.cursor()
         
         if action == 'delete':
             log_payload = ("WARN", "Admin deleted job", job_id)
@@ -588,8 +588,9 @@ def admin_action():
 @requires_auth
 def api_rescan():
     try:
-        scan_and_queue()
-        return jsonify({"status": "ok", "message": "Rescan completed successfully."})
+        # [CHANGE] Rescan must happen in a thread now to avoid blocking the response
+        threading.Thread(target=scan_and_queue, daemon=True).start()
+        return jsonify({"status": "ok", "message": "Rescan initiated in background."})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -599,18 +600,25 @@ def handle_exception(e):
     log_event("CRITICAL", f"Unhandled Exception: {str(e)}\n{traceback.format_exc()}")
     return "Internal Server Error", 500
 
-def maintenance_loop():
+# [CHANGE] Unified Background Thread orchestrator
+def background_orchestrator():
+    print("[*] Background thread started. Initializing DB...")
+    init_db()
+    print("[*] DB Ready. Scanning files...")
+    scan_and_queue() # This can take time, but now it won't block web traffic
+    print("[*] Scan complete. Entering maintenance loop.")
+    
+    # Run maintenance loop
     while True:
         try:
             logs_to_write = [] 
             with db_lock:
-                conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
+                conn = sqlite3.connect(DB_FILE, timeout=30); cursor = conn.cursor()
                 now = datetime.now()
                 
-                # [CHANGED] Added 'worker_id' to the SELECT statement
                 cursor.execute("SELECT id, filename, started_at, last_updated, worker_id FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
                 for row in cursor.fetchall():
-                    jid, fname, started, last_up, wid = row  # [CHANGED] Unpack worker_id
+                    jid, fname, started, last_up, wid = row
                     reset_job = False
                     reason = ""
 
@@ -628,7 +636,6 @@ def maintenance_loop():
                             silence = (now - l_time).total_seconds()
                             if silence > 600:
                                 reset_job = True
-                                # [CHANGED] Added worker name to the log message
                                 reason = f"Worker {wid} vanished (Silence: {silence:.0f}s)"
                         except: pass
 
@@ -648,26 +655,10 @@ def maintenance_loop():
 # APP INITIALIZATION
 # ==============================================================================
 
-def start_background_services():
-    # [FIX] Prevent duplicate INIT executions in Gunicorn
-    lock_socket = None
-    try:
-        lock_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        # Try to bind to an abstract socket address
-        lock_socket.bind('\0fractum_manager_lock') 
-        
-        print("[*] Initializing Database...")
-        init_db()
-        scan_and_queue()
-        threading.Thread(target=maintenance_loop, daemon=True).start()
-    except socket.error:
-        print("[*] Secondary worker detected. Skipping DB init (Main worker handles it).")
+# [CHANGE] We only trigger this once. Gunicorn loads the app, we start the thread.
+# This thread handles DB init, Scanning, and Maintenance.
+threading.Thread(target=background_orchestrator, daemon=True).start()
 
 if __name__ == '__main__':
-    # DEV MODE
     print(f"[*] Manager running at {SERVER_URL_DISPLAY}")
-    start_background_services()
     app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
-else:
-    # GUNICORN MODE
-    start_background_services()
