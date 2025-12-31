@@ -607,9 +607,10 @@ def maintenance_loop():
                 conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
                 now = datetime.now()
                 
-                cursor.execute("SELECT id, filename, started_at, last_updated FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
+                # [CHANGED] Added 'worker_id' to the SELECT statement
+                cursor.execute("SELECT id, filename, started_at, last_updated, worker_id FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
                 for row in cursor.fetchall():
-                    jid, fname, started, last_up = row
+                    jid, fname, started, last_up, wid = row  # [CHANGED] Unpack worker_id
                     reset_job = False
                     reason = ""
 
@@ -618,7 +619,7 @@ def maintenance_loop():
                             s_time = datetime.strptime(str(started).split('.')[0], "%Y-%m-%d %H:%M:%S")
                             if (now - s_time).total_seconds() > 86400:
                                 reset_job = True
-                                reason = "Job timed out (24h limit)"
+                                reason = f"Job timed out (24h limit). Worker: {wid}"
                         except: pass
 
                     if not reset_job and last_up:
@@ -627,7 +628,8 @@ def maintenance_loop():
                             silence = (now - l_time).total_seconds()
                             if silence > 600:
                                 reset_job = True
-                                reason = f"Worker vanished (Silence: {silence:.0f}s)"
+                                # [CHANGED] Added worker name to the log message
+                                reason = f"Worker {wid} vanished (Silence: {silence:.0f}s)"
                         except: pass
 
                     if reset_job:
