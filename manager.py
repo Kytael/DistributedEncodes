@@ -14,7 +14,6 @@ from functools import wraps
 from datetime import datetime
 from urllib.parse import quote
 
-# [FIX] Added Flask-Limiter for rate limiting
 from flask import Flask, request, jsonify, render_template, send_from_directory, send_file, Response, abort
 from werkzeug.exceptions import HTTPException
 from flask_limiter import Limiter
@@ -50,13 +49,11 @@ except ImportError:
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
-# [FIX] Secure Cookie Configuration
 app.config['SESSION_COOKIE_SECURE'] = True    
 app.config['SESSION_COOKIE_HTTPONLY'] = True  
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax' 
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024 
 
-# [FIX] Initialize Rate Limiter
 limiter = Limiter(
     get_remote_address,
     app=app,
@@ -73,7 +70,6 @@ db_lock = threading.Lock()
 # ==============================================================================
 
 def sanitize_input(val):
-    """[FIX] Allow only safe characters: A-Z, a-z, 0-9, -, _"""
     if not val: return None
     return re.sub(r'[^a-zA-Z0-9_-]', '', str(val))
 
@@ -127,7 +123,7 @@ def requires_worker_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         token = request.headers.get('X-Worker-Token') or request.args.get('token')
-        if token is None: return f(*args, **kwargs) # Transition Mode
+        if token is None: return f(*args, **kwargs) 
         if token != WORKER_SECRET:
             return jsonify({"status": "error", "message": "Unauthorized Worker"}), 401
         return f(*args, **kwargs)
@@ -145,7 +141,8 @@ def init_db():
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY, filename TEXT, status TEXT, worker_id TEXT,
                 progress INTEGER DEFAULT 0, duration INTEGER DEFAULT 0, last_updated TIMESTAMP,
-                started_at TIMESTAMP, file_size INTEGER DEFAULT 0
+                started_at TIMESTAMP, file_size INTEGER DEFAULT 0,
+                retry_count INTEGER DEFAULT 0
             )
         ''')
         cursor.execute('''
@@ -157,8 +154,12 @@ def init_db():
                 related_id TEXT
             )
         ''')
+        # Migrations
         try: cursor.execute("ALTER TABLE jobs ADD COLUMN file_size INTEGER DEFAULT 0")
         except sqlite3.OperationalError: pass
+        try: cursor.execute("ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError: pass
+
         conn.commit(); conn.close()
 
 def log_event(level, message, related_id=None):
@@ -180,13 +181,6 @@ def log_event(level, message, related_id=None):
 # ==============================================================================
 
 def verify_upload(upload_path, source_path):
-    """
-    Checks if the upload seems valid compared to the source file.
-    RELAXED RULES:
-    1. Must have AV1 Video + Opus Audio.
-    2. Duration must be within 3.0 seconds of source.
-    3. File size must be > 100KB (catches empty/corrupted headers).
-    """
     try:
         # 1. Probe the Uploaded File
         cmd = ['ffprobe', '-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', upload_path]
@@ -216,7 +210,6 @@ def verify_upload(upload_path, source_path):
         try:
             dur_source = float(source_data.get('format', {}).get('duration', 0))
             dur_upload = float(upload_data.get('format', {}).get('duration', 0))
-            
             if abs(dur_source - dur_upload) > 3.0:
                 return False, f"Duration Mismatch (Src: {dur_source:.1f}s, Up: {dur_upload:.1f}s)"
         except: pass 
@@ -332,7 +325,8 @@ python3 worker.py --username "{u}" --workername "{w}" --jobs {j} --manager "{SER
     return Response(script, mimetype='text/x-shellscript')
 
 @app.route('/download_source/<path:filename>')
-def download_source(filename): 
+def download_source(filename):
+    print(f"[DEBUG] DOWNLOAD STARTED: {filename} from {request.remote_addr}") 
     return send_from_directory(SOURCE_DIRECTORY, filename, as_attachment=True)
 
 @app.route('/get_job', methods=['GET'])
@@ -344,7 +338,7 @@ def get_job():
     search_attempts = []
     if series_id and series_id.isdigit():
         search_attempts.append(series_id)
-    search_attempts.append(None) # Fallback
+    search_attempts.append(None) 
 
     try:
         with db_lock:
@@ -406,7 +400,6 @@ def upload_result():
         temp_path = os.path.join(quarantine_dir, temp_name)
         request.files['file'].save(temp_path)
         
-        # [FIX] Get source path from DB for comparison
         with db_lock:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
@@ -420,7 +413,6 @@ def upload_result():
 
         real_source_path = os.path.join(SOURCE_DIRECTORY, row[0])
 
-        # Verify with relaxed rules + source comparison
         is_valid, reason = verify_upload(temp_path, real_source_path)
         
         if not is_valid:
@@ -457,21 +449,44 @@ def report_status():
     status = d.get('status')
     worker_id = sanitize_input(d.get('worker_id'))
     job_id = d.get('job_id')
-    
+    error_msg = d.get('error', 'Unknown Error')
+
     if status == 'completed': return jsonify({"status": "ignored"}), 403
-    
-    if status == 'failed': 
-        error_msg = d.get('error', 'Unknown Error')
-        log_event("ERROR", f"Worker {worker_id} reported failure: {error_msg}", job_id)
 
     with db_lock:
         conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+
+        # [SMART RETRY LOGIC]
+        if status == 'failed':
+            # Check current retry count
+            cursor.execute("SELECT retry_count FROM jobs WHERE id=?", (job_id,))
+            row = cursor.fetchone()
+            current_retries = row[0] if row else 0
+            
+            if current_retries < 3:
+                # RETRY: Increment count and re-queue
+                new_count = current_retries + 1
+                log_event("WARN", f"Job failed ({error_msg}). Auto-retrying ({new_count}/3).", job_id)
+                cursor.execute("UPDATE jobs SET status='queued', worker_id=NULL, progress=0, retry_count=?, last_updated=? WHERE id=?", (new_count, datetime.now(), job_id))
+                conn.commit(); conn.close()
+                return jsonify({"status": "retrying"})
+            else:
+                # GIVE UP: Mark as permanently failed
+                log_event("ERROR", f"Job failed permanently after 3 attempts. Last error: {error_msg}", job_id)
+                # Fall through to normal update below to set status='failed'
+
+        # Normal Status Update
         sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=? WHERE id=?"
         params = [status, worker_id, d.get('progress',0), datetime.now(), job_id]
+        
         if d.get('duration', 0) > 0: 
             sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=?, duration=? WHERE id=?"
             params.insert(4, d.get('duration'))
-        conn.execute(sql, tuple(params)); conn.commit(); conn.close()
+            
+        cursor.execute(sql, tuple(params))
+        conn.commit(); conn.close()
+        
     return jsonify({"status": "received"})
 
 @app.route('/api/stats')
@@ -530,14 +545,24 @@ def get_logs():
 @requires_auth
 def admin_action():
     data = request.json; job_id = data.get('job_id'); action = data.get('action')
-    log_event("WARN", f"Admin performed '{action}' on job", job_id)
     
     with db_lock:
         conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+        
         if action == 'delete':
+            log_event("WARN", "Admin deleted job", job_id)
             c.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            
         elif action == 'retry':
-            c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=? WHERE id=?", (datetime.now(), job_id))
+            log_event("INFO", "Admin forced retry", job_id)
+            # Reset retry_count to 0 so it gets 3 fresh attempts
+            c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, retry_count=0, last_updated=? WHERE id=?", (datetime.now(), job_id))
+            
+        # [NEW] Bulk Action
+        elif action == 'retry_all_failed':
+            log_event("WARN", "Admin triggered RESET ALL FAILED JOBS", "SYSTEM")
+            c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, retry_count=0, last_updated=? WHERE status='failed'", (datetime.now(),))
+            
         conn.commit(); conn.close()
     return jsonify({"status": "ok"})
 
@@ -583,9 +608,10 @@ def maintenance_loop():
                     if not reset_job and last_up:
                         try:
                             l_time = datetime.strptime(str(last_up).split('.')[0], "%Y-%m-%d %H:%M:%S")
-                            if (now - l_time).total_seconds() > 600:
+                            silence = (now - l_time).total_seconds()
+                            if silence > 600:
                                 reset_job = True
-                                reason = "Worker vanished (No heartbeat for 10m)"
+                                reason = f"Worker vanished (Silence: {silence:.0f}s)"
                         except: pass
 
                     if reset_job:
