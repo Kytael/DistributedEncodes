@@ -10,6 +10,7 @@ import shutil
 import traceback
 import uuid
 import secrets
+import socket
 from functools import wraps
 from datetime import datetime
 from urllib.parse import quote
@@ -227,7 +228,14 @@ def verify_upload(upload_path, source_path):
 def scan_and_queue():
     print(f"[*] Scanning {SOURCE_DIRECTORY}...")
     if not os.path.exists(SOURCE_DIRECTORY): os.makedirs(SOURCE_DIRECTORY)
-    conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
+    
+    # [FIX] Add timeout to prevent lock hang on startup
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10) 
+        cursor = conn.cursor()
+    except sqlite3.OperationalError:
+        print("[!] ERROR: Database is locked by another process.")
+        return
     
     count_new = 0
     for root, dirs, files in os.walk(SOURCE_DIRECTORY, topdown=True):
@@ -453,28 +461,30 @@ def report_status():
 
     if status == 'completed': return jsonify({"status": "ignored"}), 403
 
+    # [FIX] Defer logging to prevent deadlock
+    logs_to_write = []
+
     with db_lock:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
 
         # [SMART RETRY LOGIC]
         if status == 'failed':
-            # Check current retry count
             cursor.execute("SELECT retry_count FROM jobs WHERE id=?", (job_id,))
             row = cursor.fetchone()
             current_retries = row[0] if row else 0
             
             if current_retries < 3:
-                # RETRY: Increment count and re-queue
                 new_count = current_retries + 1
-                log_event("WARN", f"Job failed ({error_msg}). Auto-retrying ({new_count}/3).", job_id)
+                logs_to_write.append(("WARN", f"Job failed ({error_msg}). Auto-retrying ({new_count}/3).", job_id))
                 cursor.execute("UPDATE jobs SET status='queued', worker_id=NULL, progress=0, retry_count=?, last_updated=? WHERE id=?", (new_count, datetime.now(), job_id))
                 conn.commit(); conn.close()
+                
+                # Write logs outside lock
+                for l in logs_to_write: log_event(*l)
                 return jsonify({"status": "retrying"})
             else:
-                # GIVE UP: Mark as permanently failed
-                log_event("ERROR", f"Job failed permanently after 3 attempts. Last error: {error_msg}", job_id)
-                # Fall through to normal update below to set status='failed'
+                logs_to_write.append(("ERROR", f"Job failed permanently after 3 attempts. Last error: {error_msg}", job_id))
 
         # Normal Status Update
         sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=? WHERE id=?"
@@ -486,6 +496,9 @@ def report_status():
             
         cursor.execute(sql, tuple(params))
         conn.commit(); conn.close()
+        
+    # Write deferred logs
+    for l in logs_to_write: log_event(*l)
         
     return jsonify({"status": "received"})
 
@@ -546,24 +559,29 @@ def get_logs():
 def admin_action():
     data = request.json; job_id = data.get('job_id'); action = data.get('action')
     
+    # [FIX] Defer logging to prevent deadlock
+    log_payload = None
+
     with db_lock:
         conn = sqlite3.connect(DB_FILE); c = conn.cursor()
         
         if action == 'delete':
-            log_event("WARN", "Admin deleted job", job_id)
+            log_payload = ("WARN", "Admin deleted job", job_id)
             c.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             
         elif action == 'retry':
-            log_event("INFO", "Admin forced retry", job_id)
-            # Reset retry_count to 0 so it gets 3 fresh attempts
+            log_payload = ("INFO", "Admin forced retry", job_id)
             c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, retry_count=0, last_updated=? WHERE id=?", (datetime.now(), job_id))
             
-        # [NEW] Bulk Action
         elif action == 'retry_all_failed':
-            log_event("WARN", "Admin triggered RESET ALL FAILED JOBS", "SYSTEM")
+            log_payload = ("WARN", "Admin triggered RESET ALL FAILED JOBS", "SYSTEM")
             c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, retry_count=0, last_updated=? WHERE status='failed'", (datetime.now(),))
             
         conn.commit(); conn.close()
+    
+    if log_payload:
+        log_event(*log_payload)
+        
     return jsonify({"status": "ok"})
 
 @app.route('/api/rescan_db')
@@ -595,7 +613,6 @@ def maintenance_loop():
                     reset_job = False
                     reason = ""
 
-                    # Rule 1: Total Runtime > 24 Hours
                     if started:
                         try:
                             s_time = datetime.strptime(str(started).split('.')[0], "%Y-%m-%d %H:%M:%S")
@@ -604,7 +621,6 @@ def maintenance_loop():
                                 reason = "Job timed out (24h limit)"
                         except: pass
 
-                    # Rule 2: Heartbeat Timeout > 10 Minutes
                     if not reset_job and last_up:
                         try:
                             l_time = datetime.strptime(str(last_up).split('.')[0], "%Y-%m-%d %H:%M:%S")
@@ -626,12 +642,30 @@ def maintenance_loop():
             print(f"[!] Maintenance error: {e}")
         time.sleep(120)
 
-print("[*] Initializing Database...")
-init_db()
-scan_and_queue()
-threading.Thread(target=maintenance_loop, daemon=True).start()
+# ==============================================================================
+# APP INITIALIZATION
+# ==============================================================================
+
+def start_background_services():
+    # [FIX] Prevent duplicate INIT executions in Gunicorn
+    lock_socket = None
+    try:
+        lock_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        # Try to bind to an abstract socket address
+        lock_socket.bind('\0fractum_manager_lock') 
+        
+        print("[*] Initializing Database...")
+        init_db()
+        scan_and_queue()
+        threading.Thread(target=maintenance_loop, daemon=True).start()
+    except socket.error:
+        print("[*] Secondary worker detected. Skipping DB init (Main worker handles it).")
 
 if __name__ == '__main__':
+    # DEV MODE
     print(f"[*] Manager running at {SERVER_URL_DISPLAY}")
-    print("[!] WARNING: Running in dev mode. Use 'gunicorn manager:app' for production.")
+    start_background_services()
     app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
+else:
+    # GUNICORN MODE
+    start_background_services()
