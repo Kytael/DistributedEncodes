@@ -1,4 +1,4 @@
-# This container is for the worker, not server!
+# Dockerfile for the worker
 FROM python:3.11-slim-bookworm
 
 RUN apt-get update && \
@@ -6,10 +6,9 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# This Program requires libsvtav1, not all ffmpeg versions have it.
+# Verify AV1 support because not all version of ffmpeg support it.
 RUN ffmpeg -encoders | grep libsvtav1
 
 WORKDIR /app
 RUN pip install requests
-COPY worker.py .
-ENTRYPOINT ["python", "worker.py"]
+ENTRYPOINT ["/bin/sh", "-c", "curl -s -o worker.py https://encode.fractumseraph.net/dl/worker && python worker.py \"$@\"", "--"]
