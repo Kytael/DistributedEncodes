@@ -13,7 +13,7 @@ import json
 import signal
 import zipfile
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ==============================================================================
 # CONFIGURATION
@@ -21,7 +21,7 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.7.2" # Bumped for Windows Auto-Download
+WORKER_VERSION = "1.8.0"
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 
@@ -36,17 +36,15 @@ PAUSE_REQUESTED = False
 ACTIVE_PROCS = {}
 PROC_LOCK = threading.Lock()
 
-# Global paths for executables (will be set by check_ffmpeg)
+# Global paths for executables
 FFMPEG_CMD = "ffmpeg"
 FFPROBE_CMD = "ffprobe"
 
-# [FIX] Detect OS to handle Fonts correctly for Watermark
+# Detect OS to handle Fonts
 FONT_FILE = ""
 if platform.system() == "Windows":
-    # Common Windows font path with FFmpeg escaping
     FONT_FILE = ":fontfile='C\:\\Windows\\Fonts\\arial.ttf'" 
 else:
-    # Linux (Android/Docker) uses fontconfig
     FONT_FILE = "" 
 
 ENCODING_CONFIG = {
@@ -62,9 +60,86 @@ ENCODING_CONFIG = {
     "OUTPUT_EXT": ".mp4"
 }
 
-# ==============================================================================
-# HELPERS
-# ==============================================================================
+
+class QuotaTracker:
+    def __init__(self, limit_gb, worker_name):
+        self.limit_bytes = int(limit_gb * 1024**3) if limit_gb > 0 else 0
+        self.filename = f"usage_{re.sub(r'[^a-zA-Z0-9]', '', worker_name)}.json"
+        self.lock = threading.Lock()
+        self.current_usage = 0
+        self.last_save = 0
+        
+        # Initial Load
+        self._load()
+
+    def _load(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, 'r') as f:
+                    data = json.load(f)
+                    if data.get('date') == today:
+                        self.current_usage = data.get('bytes', 0)
+                    else:
+                        # New day, reset
+                        self.current_usage = 0
+                        self._save()
+            except:
+                self.current_usage = 0
+        else:
+            self.current_usage = 0
+
+    def _save(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        try:
+            with open(self.filename, 'w') as f:
+                json.dump({"date": today, "bytes": self.current_usage}, f)
+        except: pass
+
+    def check_cap(self):
+        """Returns True if cap is exceeded"""
+        if self.limit_bytes <= 0: return False
+        
+        # Check for day rollover
+        today = datetime.now().strftime("%Y-%m-%d")
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, 'r') as f:
+                    data = json.load(f)
+                    if data.get('date') != today:
+                        with self.lock:
+                            self.current_usage = 0
+                            self._save()
+                        return False
+            except: pass
+
+        return self.current_usage >= self.limit_bytes
+
+    def add_usage(self, num_bytes):
+        if self.limit_bytes <= 0: return
+        with self.lock:
+            self.current_usage += num_bytes
+            # Save every 50MB or 30 seconds to avoid disk spam
+            if time.time() - self.last_save > 30:
+                self._save()
+                self.last_save = time.time()
+    
+    def force_save(self):
+        with self.lock: self._save()
+
+    def get_remaining_str(self):
+        if self.limit_bytes <= 0: return "Unlimited"
+        rem = self.limit_bytes - self.current_usage
+        if rem < 0: rem = 0
+        return f"{rem / 1024**3:.2f} GB"
+    
+    def get_wait_time(self):
+        """Returns seconds until midnight tomorrow"""
+        now = datetime.now()
+        tomorrow = now + timedelta(days=1)
+        midnight = datetime(year=tomorrow.year, month=tomorrow.month, day=tomorrow.day, hour=0, minute=0, second=1)
+        return (midnight - now).total_seconds()
+
 
 def get_auth_headers():
     headers = {'User-Agent': f'FractumWorker/{WORKER_VERSION}'}
@@ -184,9 +259,6 @@ def get_seconds(t):
         return h*3600 + m*60 + s
     except: return 0
 
-# ==============================================================================
-# FFMPEG SETUP & AUTO-DOWNLOAD
-# ==============================================================================
 
 def download_ffmpeg_windows():
     print("[*] FFmpeg not found. Downloading (approx 30-40MB)...")
@@ -196,10 +268,8 @@ def download_ffmpeg_windows():
         r.raise_for_status()
         
         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-            # Find the bin folder inside the zip structure
             ffmpeg_path = None
             ffprobe_path = None
-            
             for file in z.namelist():
                 if file.endswith("bin/ffmpeg.exe"): ffmpeg_path = file
                 if file.endswith("bin/ffprobe.exe"): ffprobe_path = file
@@ -220,8 +290,6 @@ def download_ffmpeg_windows():
 
 def check_ffmpeg():
     global FFMPEG_CMD, FFPROBE_CMD
-    
-    # 1. Check current directory first (Overrides system path)
     local_ffmpeg = os.path.abspath("ffmpeg.exe")
     local_ffprobe = os.path.abspath("ffprobe.exe")
     
@@ -232,7 +300,6 @@ def check_ffmpeg():
         FFMPEG_CMD = "ffmpeg"
         FFPROBE_CMD = "ffprobe"
     else:
-        # Not found anywhere. Can we download it?
         if platform.system() == "Windows":
             if download_ffmpeg_windows():
                 FFMPEG_CMD = local_ffmpeg
@@ -240,7 +307,6 @@ def check_ffmpeg():
             else:
                 sys.exit(1)
         else:
-            # Linux auto-install attempt
             print("[!] Attempting to install ffmpeg...")
             try: subprocess.run(["sudo", "apt-get", "install", "-y", "ffmpeg"], check=False)
             except: pass
@@ -248,13 +314,10 @@ def check_ffmpeg():
                 print("[!] FFmpeg missing. Please install FFmpeg with libsvtav1.")
                 sys.exit(1)
 
-    # Verify SVT-AV1 support
     try:
         res = subprocess.run([FFMPEG_CMD, "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         if "libsvtav1" not in res.stdout:
             print("[!] FFmpeg found but missing libsvtav1 support.")
-            # On Windows, the auto-downloaded one definitely has it, so this likely means 
-            # the user has a bad system version. Warn them.
             if platform.system() == 'Windows' and FFMPEG_CMD == 'ffmpeg':
                  print("[!] HINT: You can delete the 'ffmpeg' from your PATH or let this script download a standalone version.")
     except: pass
@@ -265,11 +328,8 @@ def verify_connection(manager_url):
     except: pass
     print(f"[!] Could not connect to {manager_url}"); return False
 
-# ==============================================================================
-# WORKER LOGIC
-# ==============================================================================
 
-def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=None):
+def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=False, series_id=None):
     global UPDATE_AVAILABLE
     log(worker_id, "Thread active.")
     os.makedirs(temp_dir, exist_ok=True)
@@ -290,6 +350,20 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
              time.sleep(1); continue
 
         try:
+            # [QUOTA CHECK]
+            if quota_tracker and quota_tracker.check_cap():
+                wait_sec = quota_tracker.get_wait_time()
+                update_status("Quota Limit")
+                log(worker_id, f"Daily Quota Reached. Reset in {wait_sec/3600:.1f} hours.")
+                
+                # Sleep in chunks to allow graceful exit
+                while wait_sec > 0 and not SHUTDOWN_EVENT.is_set():
+                    time.sleep(min(60, wait_sec))
+                    wait_sec -= 60
+                    # Re-check in case user deleted file
+                    if not quota_tracker.check_cap(): break
+                continue
+
             update_status("Idle")
             if check_version(manager_url):
                 UPDATE_AVAILABLE = True; SHUTDOWN_EVENT.set(); break
@@ -325,6 +399,9 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
                                 if PAUSE_REQUESTED: 
                                     while PAUSE_REQUESTED: time.sleep(1)
                                     if SHUTDOWN_EVENT.is_set(): raise Exception("Shutdown")
+                                
+                                # [QUOTA UPDATE]
+                                if quota_tracker: quota_tracker.add_usage(len(chunk))
 
                                 f.write(chunk)
                                 downloaded += len(chunk)
@@ -336,7 +413,10 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
                                 if time.time() - last_rep > 30:
                                     post_status("downloading", pct)
                                     last_rep = time.time()
+                    
+                    if quota_tracker: quota_tracker.force_save()
                     if single_mode: print_progress(worker_id, total_size, total_size, prefix='DL', suffix='OK')
+
                 except Exception as e:
                     err_msg = str(e)
                     log(worker_id, f"Download failed: {err_msg}", "ERROR")
@@ -485,10 +565,17 @@ def run_worker(args):
     if not verify_connection(manager_url): sys.exit(1)
     if check_version(manager_url): apply_update(manager_url)
     
+    # [QUOTA TRACKER INIT]
+    quota_tracker = None
+    if args.daily_quota > 0:
+        print(f"[*] Daily Quota Active: {args.daily_quota} GB")
+        quota_tracker = QuotaTracker(args.daily_quota, base_workername)
+        if quota_tracker.check_cap():
+            print(f"[!] Quota already exceeded for today. Waiting until tomorrow.")
+
     num_jobs = args.jobs if args.jobs > 0 else 1
     if num_jobs > 32: num_jobs = 32
     
-    # Listen for both SIGINT (Ctrl+C) and SIGTERM (Docker Stop)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
@@ -504,7 +591,7 @@ def run_worker(args):
         worker_ids.append(worker_id)
         temp_dir = f"./temp_encode_{base_workername}_{i+1}"
         
-        t = threading.Thread(target=worker_task, args=(worker_id, manager_url, temp_dir, single_mode, args.series_id))
+        t = threading.Thread(target=worker_task, args=(worker_id, manager_url, temp_dir, quota_tracker, single_mode, args.series_id))
         t.daemon = True
         t.start()
         threads.append(t)
@@ -568,5 +655,6 @@ if __name__ == "__main__":
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--series-id", default=None, help="Process only specific Series ID")
     parser.add_argument("--secret", default=None, help="Manually set worker secret token")
+    parser.add_argument("--daily-quota", type=float, default=0, help="Daily download limit in GB (0 = unlimited)")
     args = parser.parse_args()
     run_worker(args)
