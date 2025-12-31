@@ -20,7 +20,7 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.7.0" # Bumped for Watermark & Relaxed Checks
+WORKER_VERSION = "1.7.0" 
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 
@@ -40,7 +40,7 @@ ENCODING_CONFIG = {
     "VIDEO_PRESET": "2",
     "VIDEO_CRF": "63",           
     "VIDEO_PIX_FMT": "yuv420p",
-    # [CHANGED] Added Watermark: @FractumSeraph, White 20% Opacity, Bottom Left
+    # [NEW] Watermark: White text, 20% opacity, bottom left padding
     "VIDEO_SCALE": "scale=-2:480,drawtext=text='@FractumSeraph':fontcolor=white@0.2:fontsize=12:x=10:y=h-th-10",
     "AUDIO_CODEC": "libopus",
     "AUDIO_BITRATE": "12k",      
@@ -77,7 +77,7 @@ def signal_handler(sig, frame):
     global PAUSE_REQUESTED
     if not PAUSE_REQUESTED:
         PAUSE_REQUESTED = True
-        sys.stdout.write('\n\n[!] PAUSE REQUESTED. Please wait...\n')
+        sys.stdout.write('\n\n[!] PAUSE REQUESTED (Stopping gracefully...)\n')
         sys.stdout.flush()
 
 def toggle_processes(suspend=True):
@@ -417,7 +417,9 @@ def run_worker(args):
     num_jobs = args.jobs if args.jobs > 0 else 1
     if num_jobs > 32: num_jobs = 32
     
+    # [FIX] Listen for both SIGINT (Ctrl+C) and SIGTERM (Docker Stop)
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     threads = []
     worker_ids = []
