@@ -163,8 +163,6 @@ def init_db():
 
 def log_event(level, message, related_id=None):
     try:
-        # [FIX] Sanitize logs before writing to DB
-        # This prevents HTML injection when viewing logs in the dashboard
         clean_msg = str(message).replace('<', '&lt;').replace('>', '&gt;')
         clean_id = sanitize_input(related_id) if related_id else None
         
@@ -181,27 +179,55 @@ def log_event(level, message, related_id=None):
 # CORE LOGIC
 # ==============================================================================
 
-def verify_upload(filepath):
+def verify_upload(upload_path, source_path):
+    """
+    Checks if the upload seems valid compared to the source file.
+    RELAXED RULES:
+    1. Must have AV1 Video + Opus Audio.
+    2. Duration must be within 3.0 seconds of source.
+    3. File size must be > 100KB (catches empty/corrupted headers).
+    """
     try:
-        cmd = ['ffprobe', '-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', filepath]
+        # 1. Probe the Uploaded File
+        cmd = ['ffprobe', '-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', upload_path]
         result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0: 
-            return False, "FFprobe Error"
-        
-        try: data = json.loads(result.stdout)
-        except json.JSONDecodeError: return False, "Invalid JSON"
+        if result.returncode != 0: return False, "FFprobe Error on Upload"
+        try: upload_data = json.loads(result.stdout)
+        except: return False, "Invalid JSON from Upload"
 
+        # 2. Probe the Source File (to compare)
+        cmd_src = ['ffprobe', '-v', 'error', '-print_format', 'json', '-show_format', source_path]
+        res_src = subprocess.run(cmd_src, capture_output=True, text=True)
+        try: source_data = json.loads(res_src.stdout)
+        except: return False, "Could not probe Source File"
+
+        # --- CHECK 1: VIDEO STREAMS ---
         has_video = False
-        for stream in data.get('streams', []):
+        for stream in upload_data.get('streams', []):
             if stream['codec_type'] == 'video':
                 if stream.get('codec_name') != 'av1': return False, "Invalid Codec (Not AV1)"
-                if int(stream.get('height', 0)) != 480: return False, "Invalid Height"
+                if int(stream.get('height', 0)) != 480: return False, "Invalid Height (Not 480p)"
                 has_video = True
             elif stream['codec_type'] == 'audio':
                 if stream.get('codec_name') != 'opus': return False, "Invalid Audio Codec"
-                
         if not has_video: return False, "No Video Stream"
+
+        # --- CHECK 2: DURATION (Tolerance: 3.0 seconds) ---
+        try:
+            dur_source = float(source_data.get('format', {}).get('duration', 0))
+            dur_upload = float(upload_data.get('format', {}).get('duration', 0))
+            
+            if abs(dur_source - dur_upload) > 3.0:
+                return False, f"Duration Mismatch (Src: {dur_source:.1f}s, Up: {dur_upload:.1f}s)"
+        except: pass 
+
+        # --- CHECK 3: MINIMUM SIZE (> 100KB) ---
+        size_upload = os.path.getsize(upload_path)
+        if size_upload < 100 * 1024: 
+            return False, "File suspiciously tiny (<100KB)"
+            
         return True, "Verified"
+
     except Exception as e:
         return False, f"Exception: {str(e)}"
 
@@ -380,7 +406,23 @@ def upload_result():
         temp_path = os.path.join(quarantine_dir, temp_name)
         request.files['file'].save(temp_path)
         
-        is_valid, reason = verify_upload(temp_path)
+        # [FIX] Get source path from DB for comparison
+        with db_lock:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM jobs WHERE id=?", (job_id,))
+            row = cursor.fetchone()
+            conn.close()
+            
+        if not row:
+            os.remove(temp_path)
+            return jsonify({"status": "error", "message": "Job ID not found"}), 404
+
+        real_source_path = os.path.join(SOURCE_DIRECTORY, row[0])
+
+        # Verify with relaxed rules + source comparison
+        is_valid, reason = verify_upload(temp_path, real_source_path)
+        
         if not is_valid:
             log_event("WARN", f"Security: Upload rejected ({reason})", job_id)
             os.remove(temp_path) 
@@ -418,7 +460,6 @@ def report_status():
     
     if status == 'completed': return jsonify({"status": "ignored"}), 403
     
-    # [NEW] Log detailed error messages from worker
     if status == 'failed': 
         error_msg = d.get('error', 'Unknown Error')
         log_event("ERROR", f"Worker {worker_id} reported failure: {error_msg}", job_id)
@@ -471,7 +512,6 @@ def api_stats():
 def api_all_jobs():
     with db_lock:
         conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
-        # [NEW] Added worker_id to result for admin filtering
         c.execute("SELECT id, status, worker_id FROM jobs ORDER BY last_updated DESC")
         jobs = [dict(r) for r in c.fetchall()]; conn.close()
         return jsonify({"jobs": jobs})
