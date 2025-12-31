@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  fractum-worker:
+    build: .
+    container_name: fractum_worker_node
+    restart: unless-stopped
+    environment:
+      - WORKER_SECRET=DefaultInsecureSecret
+    command: >
+      --manager "https://encode.fractumseraph.net/"
+      --username "DockerUser"
+      --workername "ContainerNode"
+      --jobs 1
+      # Remove the '#' below to focus on a specific series
+      # --series-id 1
+      
+    # [OPTIONAL] RAM Disk Configuration
+    # Uncomment the section below to write temporary files to RAM.
+    # This reduces SSD wear and improves speed, but requires ~3GB RAM per job.
+    # tmpfs:
+    #   - /app/temp_encode_ContainerNode_1
+    #   - /app/temp_encode_ContainerNode_2
