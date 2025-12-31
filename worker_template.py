@@ -23,7 +23,7 @@ DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
 WORKER_VERSION = "1.8.0"
 
-WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
+WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
 SHUTDOWN_EVENT = threading.Event()
 UPDATE_AVAILABLE = False
@@ -369,7 +369,7 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                 UPDATE_AVAILABLE = True; SHUTDOWN_EVENT.set(); break
 
             try: 
-                params = {}
+                params = {'worker_id': worker_id}
                 if series_id: params['series_id'] = series_id
                 r = requests.get(f"{manager_url}/get_job", params=params, headers=get_auth_headers(), timeout=10)
             except: time.sleep(5); continue
@@ -559,8 +559,8 @@ def run_worker(args):
     global WORKER_SECRET
     if args.secret: WORKER_SECRET = args.secret
 
-    if not WORKER_SECRET:
-        print("[!] WARNING: WORKER_SECRET not set. Attempting legacy connection...")
+    if WORKER_SECRET == "DefaultInsecureSecret":
+        print("[*] INFO: Using default WORKER_SECRET. Compatible with public manager defaults.")
     
     if not verify_connection(manager_url): sys.exit(1)
     if check_version(manager_url): apply_update(manager_url)
