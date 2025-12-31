@@ -20,7 +20,7 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.6.0" # Bumped version for Detailed Reporting
+WORKER_VERSION = "1.7.0" # Bumped for Watermark & Relaxed Checks
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 
@@ -39,8 +39,9 @@ ENCODING_CONFIG = {
     "VIDEO_CODEC": "libsvtav1",
     "VIDEO_PRESET": "2",
     "VIDEO_CRF": "63",           
-    "VIDEO_PIX_FMT": "yuv420p",  
-    "VIDEO_SCALE": "scale=-2:480",
+    "VIDEO_PIX_FMT": "yuv420p",
+    # [CHANGED] Added Watermark: @FractumSeraph, White 20% Opacity, Bottom Left
+    "VIDEO_SCALE": "scale=-2:480,drawtext=text='@FractumSeraph':fontcolor=white@0.2:fontsize=12:x=10:y=h-th-10",
     "AUDIO_CODEC": "libopus",
     "AUDIO_BITRATE": "12k",      
     "AUDIO_CHANNELS": "1",       
