@@ -11,7 +11,8 @@ import traceback
 import platform
 import json
 import signal
-import ctypes
+import zipfile
+import io
 from datetime import datetime
 
 # ==============================================================================
@@ -20,7 +21,7 @@ from datetime import datetime
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.7.1" # Bumped for Windows Font Fix
+WORKER_VERSION = "1.7.2" # Bumped for Windows Auto-Download
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 
@@ -35,8 +36,11 @@ PAUSE_REQUESTED = False
 ACTIVE_PROCS = {}
 PROC_LOCK = threading.Lock()
 
+# Global paths for executables (will be set by check_ffmpeg)
+FFMPEG_CMD = "ffmpeg"
+FFPROBE_CMD = "ffprobe"
+
 # [FIX] Detect OS to handle Fonts correctly for Watermark
-# Windows needs an explicit path to a font file. Linux usually finds one automatically.
 FONT_FILE = ""
 if platform.system() == "Windows":
     # Common Windows font path with FFmpeg escaping
@@ -50,10 +54,7 @@ ENCODING_CONFIG = {
     "VIDEO_PRESET": "2",
     "VIDEO_CRF": "63",           
     "VIDEO_PIX_FMT": "yuv420p",
-    
-    # [FIXED] Watermark now includes the OS-specific font file path if needed
     "VIDEO_SCALE": f"scale=-2:480,drawtext=text='@FractumSeraph'{FONT_FILE}:fontcolor=white@0.2:fontsize=12:x=10:y=h-th-10",
-    
     "AUDIO_CODEC": "libopus",
     "AUDIO_BITRATE": "12k",      
     "AUDIO_CHANNELS": "1",       
@@ -183,22 +184,80 @@ def get_seconds(t):
         return h*3600 + m*60 + s
     except: return 0
 
+# ==============================================================================
+# FFMPEG SETUP & AUTO-DOWNLOAD
+# ==============================================================================
+
+def download_ffmpeg_windows():
+    print("[*] FFmpeg not found. Downloading (approx 30-40MB)...")
+    try:
+        url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+        r = requests.get(url, stream=True)
+        r.raise_for_status()
+        
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            # Find the bin folder inside the zip structure
+            ffmpeg_path = None
+            ffprobe_path = None
+            
+            for file in z.namelist():
+                if file.endswith("bin/ffmpeg.exe"): ffmpeg_path = file
+                if file.endswith("bin/ffprobe.exe"): ffprobe_path = file
+            
+            if not ffmpeg_path or not ffprobe_path:
+                raise Exception("Could not find ffmpeg.exe in downloaded zip")
+            
+            print("[*] Extracting FFmpeg...")
+            with open("ffmpeg.exe", "wb") as f:
+                f.write(z.read(ffmpeg_path))
+            with open("ffprobe.exe", "wb") as f:
+                f.write(z.read(ffprobe_path))
+        print("[*] FFmpeg installed locally!")
+        return True
+    except Exception as e:
+        print(f"[!] Auto-download failed: {e}")
+        return False
+
 def check_ffmpeg():
-    def has_svtav1():
-        try:
-            res = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            return "libsvtav1" in res.stdout
-        except: return False
-    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
-        if has_svtav1(): return
-        print("[!] FFmpeg found but missing libsvtav1 support.")
-    if platform.system() != 'Windows':
-        print("[!] Attempting to install ffmpeg...")
-        try: subprocess.run(["sudo", "apt-get", "install", "-y", "ffmpeg"], check=False)
-        except: pass
-    if not (shutil.which("ffmpeg") and has_svtav1()):
-        print("[!] FFmpeg missing or incompatible. Please install FFmpeg with libsvtav1.")
-        sys.exit(1)
+    global FFMPEG_CMD, FFPROBE_CMD
+    
+    # 1. Check current directory first (Overrides system path)
+    local_ffmpeg = os.path.abspath("ffmpeg.exe")
+    local_ffprobe = os.path.abspath("ffprobe.exe")
+    
+    if os.path.exists(local_ffmpeg) and os.path.exists(local_ffprobe):
+        FFMPEG_CMD = local_ffmpeg
+        FFPROBE_CMD = local_ffprobe
+    elif shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        FFMPEG_CMD = "ffmpeg"
+        FFPROBE_CMD = "ffprobe"
+    else:
+        # Not found anywhere. Can we download it?
+        if platform.system() == "Windows":
+            if download_ffmpeg_windows():
+                FFMPEG_CMD = local_ffmpeg
+                FFPROBE_CMD = local_ffprobe
+            else:
+                sys.exit(1)
+        else:
+            # Linux auto-install attempt
+            print("[!] Attempting to install ffmpeg...")
+            try: subprocess.run(["sudo", "apt-get", "install", "-y", "ffmpeg"], check=False)
+            except: pass
+            if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+                print("[!] FFmpeg missing. Please install FFmpeg with libsvtav1.")
+                sys.exit(1)
+
+    # Verify SVT-AV1 support
+    try:
+        res = subprocess.run([FFMPEG_CMD, "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if "libsvtav1" not in res.stdout:
+            print("[!] FFmpeg found but missing libsvtav1 support.")
+            # On Windows, the auto-downloaded one definitely has it, so this likely means 
+            # the user has a bad system version. Warn them.
+            if platform.system() == 'Windows' and FFMPEG_CMD == 'ffmpeg':
+                 print("[!] HINT: You can delete the 'ffmpeg' from your PATH or let this script download a standalone version.")
+    except: pass
 
 def verify_connection(manager_url):
     try:
@@ -287,7 +346,7 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
                 update_status("Probing")
                 total_sec = 0; total_min = 0; audio_index = 0; subtitle_indices = []
                 try:
-                    cmd_probe = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', local_src]
+                    cmd_probe = [FFPROBE_CMD, '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', local_src]
                     res = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     probe_data = json.loads(res.stdout)
                     dur = probe_data.get('format', {}).get('duration')
@@ -308,7 +367,7 @@ def worker_task(worker_id, manager_url, temp_dir, single_mode=False, series_id=N
                 log(worker_id, f"Encoding ({total_min}m)...")
                 post_status("processing", 0, total_min)
                 
-                cmd = ['ffmpeg', '-y', '-i', local_src, '-map', '0:v:0', '-map', f'0:{audio_index}']
+                cmd = [FFMPEG_CMD, '-y', '-i', local_src, '-map', '0:v:0', '-map', f'0:{audio_index}']
                 for idx in subtitle_indices: cmd.extend(['-map', f'0:{idx}'])
                 cmd.extend(['-c:v', ENCODING_CONFIG["VIDEO_CODEC"], '-preset', ENCODING_CONFIG["VIDEO_PRESET"], '-crf', ENCODING_CONFIG["VIDEO_CRF"], '-pix_fmt', ENCODING_CONFIG["VIDEO_PIX_FMT"], '-vf', ENCODING_CONFIG["VIDEO_SCALE"], '-c:a', ENCODING_CONFIG["AUDIO_CODEC"], '-b:a', ENCODING_CONFIG["AUDIO_BITRATE"], '-ac', ENCODING_CONFIG["AUDIO_CHANNELS"], '-c:s', ENCODING_CONFIG["SUBTITLE_CODEC"], '-progress', 'pipe:1', local_dst])
                 
@@ -429,7 +488,7 @@ def run_worker(args):
     num_jobs = args.jobs if args.jobs > 0 else 1
     if num_jobs > 32: num_jobs = 32
     
-    # [FIX] Listen for both SIGINT (Ctrl+C) and SIGTERM (Docker Stop)
+    # Listen for both SIGINT (Ctrl+C) and SIGTERM (Docker Stop)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
