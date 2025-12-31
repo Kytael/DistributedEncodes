@@ -178,8 +178,10 @@ def init_db():
 
 def log_event(level, message, related_id=None):
     try:
-        # [FIX] Sanitize logs before writing
-        clean_msg = str(message).replace('<', '&lt;').replace('>', '&gt;')
+        # [FIX] HTML Escape for Message (Preserves spaces/text but stops XSS)
+        clean_msg = str(message).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        
+        # [FIX] Strict Sanitize for ID (No spaces allowed)
         clean_id = sanitize_input(related_id) if related_id else None
         
         with db_lock:
@@ -466,14 +468,20 @@ def report_status():
     d = request.json
     status = d.get('status')
     worker_id = sanitize_input(d.get('worker_id')) # [FIX] Sanitize
+    job_id = d.get('job_id')
     
     if status == 'completed': return jsonify({"status": "ignored"}), 403
-    if status == 'failed': log_event("WARN", f"Worker {worker_id} reported failure", d.get('job_id'))
+    
+    # [NEW] Log the specific error message if provided
+    if status == 'failed': 
+        # Escape HTML for safety, but don't strictly sanitize (keep spaces)
+        raw_error = str(d.get('error', 'Unknown Error'))
+        log_event("ERROR", f"Worker {worker_id} failed: {raw_error}", job_id)
 
     with db_lock:
         conn = sqlite3.connect(DB_FILE)
         sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=? WHERE id=?"
-        params = [status, worker_id, d.get('progress',0), datetime.now(), d.get('job_id')]
+        params = [status, worker_id, d.get('progress',0), datetime.now(), job_id]
         if d.get('duration', 0) > 0: 
             sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=?, duration=? WHERE id=?"
             params.insert(4, d.get('duration'))
@@ -519,7 +527,8 @@ def api_stats():
 def api_all_jobs():
     with db_lock:
         conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
-        c.execute("SELECT id, status FROM jobs ORDER BY last_updated DESC")
+        # [FIX] Added worker_id to selection for Admin Filter
+        c.execute("SELECT id, status, worker_id FROM jobs ORDER BY last_updated DESC")
         jobs = [dict(r) for r in c.fetchall()]; conn.close()
         return jsonify({"jobs": jobs})
 
