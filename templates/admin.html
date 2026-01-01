@@ -72,6 +72,7 @@
                 <h1>// SYSTEM_ADMIN</h1>
             </div>
             <div>
+                <button onclick="act('all','clear_stale')" style="border-color: var(--neon-orange); color: var(--neon-orange);">[ PRUNE DEAD WORKERS ]</button>
                 <button onclick="act('all','retry_all_failed')" style="border-color: var(--neon-red); color: var(--neon-red);">[ RESET FAILED ]</button>
                 <button onclick="rescanDB()" style="border-color: var(--neon-green); color: var(--neon-green);">[ SCAN FILES ]</button>
                 <button onclick="refreshAll()" style="border-color: var(--neon-purple); color: var(--neon-purple);">[ REFRESH DATA ]</button>
@@ -87,12 +88,6 @@
                 <button class="t-completed" onclick="toggleJobFilter('completed')" id="jf-completed">DONE</button>
             </div>
             
-            <div class="label">SORT:</div>
-            <div class="toolbar-group">
-                <button class="active" onclick="setSort('recent')" id="s-recent">RECENT</button>
-                <button onclick="setSort('queue')" id="s-queue">QUEUE ORDER</button>
-            </div>
-
             <div class="label">SEARCH:</div>
             <div class="toolbar-group">
                 <input type="text" id="searchInput" placeholder="Worker / File / ID..." onkeyup="applyFilters()">
@@ -149,7 +144,6 @@
         
         let jobFilters = { failed: true, processing: true, queued: false, completed: false };
         let logFilters = { ERROR: true, CRITICAL: true, WARN: true, INFO: false };
-        let currentSort = 'recent';
 
         function escapeHTML(str) {
             if (!str) return "";
@@ -178,14 +172,6 @@
             document.getElementById(`jf-${key}`).classList.toggle('active');
             applyFilters();
         }
-        
-        function setSort(val) {
-            currentSort = val;
-            document.getElementById('s-recent').classList.remove('active');
-            document.getElementById('s-queue').classList.remove('active');
-            document.getElementById(`s-${val}`).classList.add('active');
-            applyFilters();
-        }
 
         function toggleLogFilter(key) {
             logFilters[key] = !logFilters[key];
@@ -211,20 +197,13 @@
                 }
                 return true;
             });
-            
-            // [MODIFIED] Sorting Logic
-            if (currentSort === 'queue') {
-                filteredJobs.sort((a, b) => a.id.localeCompare(b.id));
-            } else {
-                filteredJobs.sort((a, b) => (b.last_updated || '').localeCompare(a.last_updated || ''));
-            }
 
             if (filteredJobs.length === 0) {
                 tbodyJobs.innerHTML = '<tr><td colspan="4" style="text-align:center; color:#555;">// NO DATA MATCHES FILTER //</td></tr>';
             } else {
                 tbodyJobs.innerHTML = filteredJobs.map(j => {
                     const cleanName = j.id.split('/').pop();
-                    const workerDisplay = j.worker_id ? `<span class="worker-tag" onclick="setSearch('${escapeHTML(j.worker_id)}')">${escapeHTML(j.worker_id)} <small style="color:#666; font-size:0.8em;">(v${escapeHTML(j.worker_version || '?')})</small></span>` : '<span style="color:#444">-</span>';
+                    const workerDisplay = j.worker_id ? `<span class="worker-tag" onclick="setSearch('${escapeHTML(j.worker_id)}')">${escapeHTML(j.worker_id)}</span>` : '<span style="color:#444">-</span>';
                     
                     let actions = `<button onclick="act('${escapeHTML(j.id)}','delete')" style="border-color:var(--neon-red); color:var(--neon-red)">DEL</button>`;
                     if (j.status === 'failed' || j.status === 'completed') {
@@ -277,6 +256,7 @@
         function act(id, action) {
             let msg = `${action.toUpperCase()} job?`;
             if (action === 'retry_all_failed') msg = "WARNING: This will reset ALL failed jobs. Confirm?";
+            if (action === 'clear_stale') msg = "Clear workers silent for >10 mins?";
             
             if(!confirm(msg)) return;
             fetch('/api/admin_action', {
