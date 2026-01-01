@@ -74,7 +74,7 @@ db_lock = threading.Lock()
 # ==============================================================================
 
 def sanitize_input(val):
-    """[FIX] Allow only safe characters: A-Z, a-z, 0-9, -, _, . (added dot for versions)"""
+    """[FIX] Allow only safe characters: A-Z, a-z, 0-9, -, _, ."""
     if not val: return None
     return re.sub(r'[^a-zA-Z0-9_.-]', '', str(val))
 
@@ -296,10 +296,6 @@ def get_series_list():
 
 @app.route('/')
 def dashboard(): return render_template('dashboard.html')
-
-# [REMOVED] Web Worker references for now
-# @app.route('/web_worker')
-# def web_worker_client(): return render_template('web_worker.html')
 
 @app.route('/admin')
 @limiter.limit("5 per minute") # [FIX] Rate limit login attempts
@@ -533,8 +529,8 @@ def api_stats():
 def api_all_jobs():
     with db_lock:
         conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
-        # [MODIFIED] Added worker_version to selection
-        c.execute("SELECT id, status, worker_id, worker_version FROM jobs ORDER BY last_updated DESC")
+        # [MODIFIED] Added last_updated (needed for sort) and worker_version
+        c.execute("SELECT id, status, worker_id, worker_version, last_updated FROM jobs ORDER BY last_updated DESC")
         jobs = [dict(r) for r in c.fetchall()]; conn.close()
         return jsonify({"jobs": jobs})
 
