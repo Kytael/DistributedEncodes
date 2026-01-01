@@ -202,7 +202,7 @@
             } else {
                 tbodyJobs.innerHTML = filteredJobs.map(j => {
                     const cleanName = j.id.split('/').pop();
-                    const workerDisplay = j.worker_id ? `<span class="worker-tag" onclick="setSearch('${escapeHTML(j.worker_id)}')">${escapeHTML(j.worker_id)}</span>` : '<span style="color:#444">-</span>';
+                    const workerDisplay = j.worker_id ? `<span class="worker-tag" onclick="setSearch('${escapeHTML(j.worker_id)}')">${escapeHTML(j.worker_id)} <small style="color:#666; font-size:0.8em;">(v${escapeHTML(j.worker_version || '?')})</small></span>` : '<span style="color:#444">-</span>';
                     
                     let actions = `<button onclick="act('${escapeHTML(j.id)}','delete')" style="border-color:var(--neon-red); color:var(--neon-red)">DEL</button>`;
                     if (j.status === 'failed' || j.status === 'completed') {
