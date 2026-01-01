@@ -87,6 +87,12 @@
                 <button class="t-completed" onclick="toggleJobFilter('completed')" id="jf-completed">DONE</button>
             </div>
             
+            <div class="label">SORT:</div>
+            <div class="toolbar-group">
+                <button class="active" onclick="setSort('recent')" id="s-recent">RECENT</button>
+                <button onclick="setSort('queue')" id="s-queue">QUEUE ORDER</button>
+            </div>
+
             <div class="label">SEARCH:</div>
             <div class="toolbar-group">
                 <input type="text" id="searchInput" placeholder="Worker / File / ID..." onkeyup="applyFilters()">
@@ -143,6 +149,7 @@
         
         let jobFilters = { failed: true, processing: true, queued: false, completed: false };
         let logFilters = { ERROR: true, CRITICAL: true, WARN: true, INFO: false };
+        let currentSort = 'recent';
 
         function escapeHTML(str) {
             if (!str) return "";
@@ -171,6 +178,14 @@
             document.getElementById(`jf-${key}`).classList.toggle('active');
             applyFilters();
         }
+        
+        function setSort(val) {
+            currentSort = val;
+            document.getElementById('s-recent').classList.remove('active');
+            document.getElementById('s-queue').classList.remove('active');
+            document.getElementById(`s-${val}`).classList.add('active');
+            applyFilters();
+        }
 
         function toggleLogFilter(key) {
             logFilters[key] = !logFilters[key];
@@ -196,6 +211,13 @@
                 }
                 return true;
             });
+            
+            // [MODIFIED] Sorting Logic
+            if (currentSort === 'queue') {
+                filteredJobs.sort((a, b) => a.id.localeCompare(b.id));
+            } else {
+                filteredJobs.sort((a, b) => (b.last_updated || '').localeCompare(a.last_updated || ''));
+            }
 
             if (filteredJobs.length === 0) {
                 tbodyJobs.innerHTML = '<tr><td colspan="4" style="text-align:center; color:#555;">// NO DATA MATCHES FILTER //</td></tr>';
