@@ -154,7 +154,7 @@ def requires_worker_auth(f):
 
 def init_db():
     with db_lock:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS jobs (
@@ -188,7 +188,7 @@ def log_event(level, message, related_id=None):
         clean_id = sanitize_input(related_id) if related_id else None
         
         with db_lock:
-            conn = sqlite3.connect(DB_FILE)
+            conn = sqlite3.connect(DB_FILE, timeout=30)
             conn.execute("INSERT INTO system_logs (timestamp, level, message, related_id) VALUES (?, ?, ?, ?)",
                          (datetime.now(), level, clean_msg, clean_id))
             conn.commit(); conn.close()
@@ -227,26 +227,38 @@ def verify_upload(filepath):
 def scan_and_queue():
     print(f"[*] Scanning {SOURCE_DIRECTORY}...")
     if not os.path.exists(SOURCE_DIRECTORY): os.makedirs(SOURCE_DIRECTORY)
-    conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
     
+    # [OPTIMIZATION] Step 1: Scan filesystem (Slow, no DB lock)
+    found_files = []
+    try:
+        for root, dirs, files in os.walk(SOURCE_DIRECTORY, topdown=True):
+            dirs.sort(); files.sort()
+            for file in files:
+                if file.lower().endswith(VIDEO_EXTENSIONS):
+                    full_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(full_path, SOURCE_DIRECTORY)
+                    fsize = os.path.getsize(full_path)
+                    found_files.append((rel_path, file, fsize))
+    except Exception as e:
+        print(f"[!] Scanner error: {e}")
+        return
+
+    # [OPTIMIZATION] Step 2: Update Database (Fast, short lock)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    cursor = conn.cursor()
     count_new = 0
-    for root, dirs, files in os.walk(SOURCE_DIRECTORY, topdown=True):
-        dirs.sort(); files.sort()
-        for file in files:
-            if file.lower().endswith(VIDEO_EXTENSIONS):
-                full_path = os.path.join(root, file)
-                rel_path = os.path.relpath(full_path, SOURCE_DIRECTORY)
-                fsize = os.path.getsize(full_path)
-                
-                cursor.execute("SELECT id FROM jobs WHERE id=?", (rel_path,))
-                if not cursor.fetchone():
-                    cursor.execute("INSERT INTO jobs (id, filename, status, last_updated, file_size) VALUES (?, ?, 'queued', ?, ?)", (rel_path, file, datetime.now(), fsize))
-                    count_new += 1
-                    
+    
+    for rel_path, file, fsize in found_files:
+        cursor.execute("SELECT id FROM jobs WHERE id=?", (rel_path,))
+        if not cursor.fetchone():
+            cursor.execute("INSERT INTO jobs (id, filename, status, last_updated, file_size) VALUES (?, ?, 'queued', ?, ?)", (rel_path, file, datetime.now(), fsize))
+            count_new += 1
+            
     conn.commit()
     if count_new > 0: log_event("INFO", f"Scanner found {count_new} new files.")
 
     print("[*] Loading queue...")
+    # Refresh memory queue
     cursor.execute("SELECT id, filename, file_size FROM jobs WHERE status = 'queued'")
     for row in cursor.fetchall():
         if row[0] not in queued_job_ids:
@@ -360,7 +372,7 @@ def get_job():
 
     try:
         with db_lock:
-            conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
+            conn = sqlite3.connect(DB_FILE, timeout=30); conn.row_factory = sqlite3.Row; c = conn.cursor()
             
             job = None
             
@@ -441,7 +453,7 @@ def upload_result():
             log_event("WARN", f"Security: Upload rejected ({reason})", job_id)
             os.remove(temp_path) # Nuke it
             with db_lock:
-                conn = sqlite3.connect(DB_FILE)
+                conn = sqlite3.connect(DB_FILE, timeout=30)
                 conn.execute("UPDATE jobs SET status='failed', last_updated=? WHERE id=?", (datetime.now(), job_id))
                 conn.commit(); conn.close()
             return jsonify({"status": "error", "message": reason}), 400
@@ -457,7 +469,7 @@ def upload_result():
         shutil.move(temp_path, save_path) # Atomic move
 
         with db_lock:
-            conn = sqlite3.connect(DB_FILE)
+            conn = sqlite3.connect(DB_FILE, timeout=30)
             conn.execute("UPDATE jobs SET status='completed', progress=100, worker_id=?, last_updated=? WHERE id=?", (worker_id, datetime.now(), job_id))
             conn.commit(); conn.close()
             
@@ -481,7 +493,7 @@ def report_status():
         log_event("WARN", f"Worker {worker_id} (v{worker_version}) reported failure", d.get('job_id'))
 
     with db_lock:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=? WHERE id=?"
         params = [status, worker_id, d.get('progress',0), datetime.now(), d.get('job_id')]
         if d.get('duration', 0) > 0: 
@@ -498,7 +510,7 @@ def api_stats():
     elif filter_val == '30d': time_filter = " AND last_updated > datetime('now', '-30 days')"
 
     with db_lock:
-        conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
+        conn = sqlite3.connect(DB_FILE, timeout=30); conn.row_factory = sqlite3.Row; c = conn.cursor()
         c.execute(f"SELECT CASE WHEN instr(worker_id, '-') > 0 THEN substr(worker_id, 1, instr(worker_id, '-') - 1) ELSE worker_id END as worker_id, SUM(duration) as total_minutes, COUNT(*) as files_count FROM jobs WHERE status='completed' AND worker_id IS NOT NULL {time_filter} GROUP BY 1 ORDER BY total_minutes DESC")
         sb = [dict(r) for r in c.fetchall()]
         
@@ -528,7 +540,7 @@ def api_stats():
 @requires_auth
 def api_all_jobs():
     with db_lock:
-        conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
+        conn = sqlite3.connect(DB_FILE, timeout=30); conn.row_factory = sqlite3.Row; c = conn.cursor()
         # [MODIFIED] Added last_updated (needed for sort) and worker_version
         c.execute("SELECT id, status, worker_id, worker_version, last_updated FROM jobs ORDER BY last_updated DESC")
         jobs = [dict(r) for r in c.fetchall()]; conn.close()
@@ -539,7 +551,7 @@ def api_all_jobs():
 def get_logs():
     limit = request.args.get('limit', 100)
     with db_lock:
-        conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
+        conn = sqlite3.connect(DB_FILE, timeout=30); conn.row_factory = sqlite3.Row; c = conn.cursor()
         c.execute("SELECT * FROM system_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
         logs = [dict(r) for r in c.fetchall()]; conn.close()
     return jsonify({"logs": logs})
@@ -551,7 +563,7 @@ def admin_action():
     log_event("WARN", f"Admin performed '{action}' on job", job_id)
     
     with db_lock:
-        conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+        conn = sqlite3.connect(DB_FILE, timeout=30); c = conn.cursor()
         if action == 'delete':
             c.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         elif action == 'retry':
@@ -580,7 +592,7 @@ def maintenance_loop():
         try:
             logs_to_write = [] 
             with db_lock:
-                conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
+                conn = sqlite3.connect(DB_FILE, timeout=30); cursor = conn.cursor()
                 now = datetime.now()
                 
                 # Rule 1: 24h timeout
@@ -610,6 +622,9 @@ print("[*] Initializing Database...")
 init_db()
 scan_and_queue()
 threading.Thread(target=maintenance_loop, daemon=True).start()
+
+# [NEW] Explicit Ready Message for Gunicorn logs
+print(f"[*] Manager initialized and ready. (Service URL: {SERVER_URL_DISPLAY})")
 
 if __name__ == '__main__':
     print(f"[*] Manager running at {SERVER_URL_DISPLAY}")
