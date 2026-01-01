@@ -377,6 +377,12 @@ def upload_result():
     job_id = request.form.get('job_id')
     worker_id = sanitize_input(request.form.get('worker_id'))
     
+    # [FIX] Capture duration
+    try:
+        duration = int(float(request.form.get('duration', 0)))
+    except:
+        duration = 0
+    
     if 'file' in request.files and job_id:
         base_name, _ = os.path.splitext(job_id)
         new_filename = base_name + ".mp4"
@@ -406,7 +412,8 @@ def upload_result():
 
         with db_lock:
             conn = sqlite3.connect(DB_FILE, timeout=30)
-            conn.execute("UPDATE jobs SET status='completed', progress=100, worker_id=?, last_updated=? WHERE id=?", (worker_id, datetime.now(), job_id))
+            # [FIX] Save duration to DB
+            conn.execute("UPDATE jobs SET status='completed', progress=100, worker_id=?, last_updated=?, duration=? WHERE id=?", (worker_id, datetime.now(), duration, job_id))
             conn.commit(); conn.close()
             
         log_event("INFO", f"Job completed by {worker_id}", job_id)
