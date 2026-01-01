@@ -74,9 +74,9 @@ db_lock = threading.Lock()
 # ==============================================================================
 
 def sanitize_input(val):
-    """[FIX] Allow only safe characters: A-Z, a-z, 0-9, -, _"""
+    """[FIX] Allow only safe characters: A-Z, a-z, 0-9, -, _, . (added dot for versions)"""
     if not val: return None
-    return re.sub(r'[^a-zA-Z0-9_-]', '', str(val))
+    return re.sub(r'[^a-zA-Z0-9_.-]', '', str(val))
 
 @app.after_request
 def add_security_headers(response):
@@ -174,6 +174,11 @@ def init_db():
         ''')
         try: cursor.execute("ALTER TABLE jobs ADD COLUMN file_size INTEGER DEFAULT 0")
         except sqlite3.OperationalError: pass
+        
+        # [NEW] Add worker_version column
+        try: cursor.execute("ALTER TABLE jobs ADD COLUMN worker_version TEXT")
+        except sqlite3.OperationalError: pass
+
         conn.commit(); conn.close()
 
 def log_event(level, message, related_id=None):
@@ -347,6 +352,7 @@ def get_job():
     max_size_mb = request.args.get('max_size_mb')
     series_id = request.args.get('series_id')
     worker_id = sanitize_input(request.args.get('worker_id'))
+    worker_version = sanitize_input(request.args.get('version')) # [NEW] Capture version
     
     # Define search passes:
     # 1. First try the specific series requested (if any)
@@ -398,7 +404,11 @@ def get_job():
             # If we found a job (either specific or fallback)
             if job:
                 job['download_url'] = f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(job['id'], safe='/')}"
-                conn.execute("UPDATE jobs SET status='processing', worker_id=?, last_updated=?, started_at=? WHERE id=?", (worker_id, datetime.now(), datetime.now(), job['id']))
+                # [MODIFIED] Store worker_version
+                conn.execute(
+                    "UPDATE jobs SET status='processing', worker_id=?, worker_version=?, last_updated=?, started_at=? WHERE id=?", 
+                    (worker_id, worker_version, datetime.now(), datetime.now(), job['id'])
+                )
                 conn.commit(); conn.close()
                 return jsonify({"status": "ok", "job": job})
             
@@ -466,9 +476,13 @@ def report_status():
     d = request.json
     status = d.get('status')
     worker_id = sanitize_input(d.get('worker_id')) # [FIX] Sanitize
+    worker_version = sanitize_input(d.get('version')) # [NEW]
     
     if status == 'completed': return jsonify({"status": "ignored"}), 403
-    if status == 'failed': log_event("WARN", f"Worker {worker_id} reported failure", d.get('job_id'))
+    
+    # [MODIFIED] Log version on failure
+    if status == 'failed': 
+        log_event("WARN", f"Worker {worker_id} (v{worker_version}) reported failure", d.get('job_id'))
 
     with db_lock:
         conn = sqlite3.connect(DB_FILE)
@@ -519,7 +533,8 @@ def api_stats():
 def api_all_jobs():
     with db_lock:
         conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; c = conn.cursor()
-        c.execute("SELECT id, status FROM jobs ORDER BY last_updated DESC")
+        # [MODIFIED] Added worker_version to selection
+        c.execute("SELECT id, status, worker_id, worker_version FROM jobs ORDER BY last_updated DESC")
         jobs = [dict(r) for r in c.fetchall()]; conn.close()
         return jsonify({"jobs": jobs})
 
