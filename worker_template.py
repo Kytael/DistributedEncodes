@@ -339,7 +339,14 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
         
     def post_status(status, progress=0, duration=0, error_msg=None):
         try:
-            payload = {"worker_id":worker_id, "job_id":job_id, "status":status, "progress":progress}
+            # [MODIFIED] Send version
+            payload = {
+                "worker_id": worker_id, 
+                "job_id": job_id, 
+                "status": status, 
+                "progress": progress,
+                "version": WORKER_VERSION
+            }
             if duration > 0: payload["duration"] = duration
             if error_msg: payload["error"] = error_msg
             requests.post(f"{manager_url}/report_status", json=payload, headers=get_auth_headers(), timeout=10)
@@ -369,7 +376,8 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                 UPDATE_AVAILABLE = True; SHUTDOWN_EVENT.set(); break
 
             try: 
-                params = {'worker_id': worker_id}
+                # [MODIFIED] Send version
+                params = {'worker_id': worker_id, 'version': WORKER_VERSION}
                 if series_id: params['series_id'] = series_id
                 r = requests.get(f"{manager_url}/get_job", params=params, headers=get_auth_headers(), timeout=10)
             except: time.sleep(5); continue
