@@ -244,32 +244,33 @@ def scan_and_queue():
         return
 
     # [OPTIMIZATION] Step 2: Update Database (Fast, short lock)
-    conn = sqlite3.connect(DB_FILE, timeout=30)
-    cursor = conn.cursor()
-    count_new = 0
-    
-    for rel_path, file, fsize in found_files:
-        cursor.execute("SELECT id FROM jobs WHERE id=?", (rel_path,))
-        if not cursor.fetchone():
-            cursor.execute("INSERT INTO jobs (id, filename, status, last_updated, file_size) VALUES (?, ?, 'queued', ?, ?)", (rel_path, file, datetime.now(), fsize))
-            count_new += 1
-            
-    conn.commit()
-    if count_new > 0: log_event("INFO", f"Scanner found {count_new} new files.")
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE, timeout=30)
+        cursor = conn.cursor()
+        count_new = 0
+        
+        for rel_path, file, fsize in found_files:
+            cursor.execute("SELECT id FROM jobs WHERE id=?", (rel_path,))
+            if not cursor.fetchone():
+                cursor.execute("INSERT INTO jobs (id, filename, status, last_updated, file_size) VALUES (?, ?, 'queued', ?, ?)", (rel_path, file, datetime.now(), fsize))
+                count_new += 1
+                
+        conn.commit()
+        if count_new > 0: log_event("INFO", f"Scanner found {count_new} new files.")
 
-    print("[*] Loading queue...")
-    # Refresh memory queue
-    cursor.execute("SELECT id, filename, file_size FROM jobs WHERE status = 'queued'")
-    for row in cursor.fetchall():
-        if row[0] not in queued_job_ids:
-            job_queue.put({
-                "id": row[0], 
-                "filename": row[1], 
-                "file_size": row[2],
-                "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(row[0], safe='/')}"
-            })
-            queued_job_ids.add(row[0])
-    conn.close()
+        print("[*] Loading queue...")
+        # Refresh memory queue
+        cursor.execute("SELECT id, filename, file_size FROM jobs WHERE status = 'queued'")
+        for row in cursor.fetchall():
+            if row[0] not in queued_job_ids:
+                job_queue.put({
+                    "id": row[0], 
+                    "filename": row[1], 
+                    "file_size": row[2],
+                    "download_url": f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(row[0], safe='/')}"
+                })
+                queued_job_ids.add(row[0])
+        conn.close()
 
 # [NEW] Series Enumeration Helper
 def get_series_list():
@@ -568,7 +569,11 @@ def admin_action():
             c.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         elif action == 'retry':
             c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=? WHERE id=?", (datetime.now(), job_id))
-            # No need to push to memory queue anymore
+        
+        # [FIX] Added logic for 'RESET FAILED' button
+        elif action == 'retry_all_failed':
+            c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=? WHERE status='failed'", (datetime.now(),))
+            
         conn.commit(); conn.close()
     return jsonify({"status": "ok"})
 
