@@ -12,6 +12,7 @@ import platform
 import json
 import signal
 import zipfile
+import tarfile
 import io
 from datetime import datetime, timedelta
 
@@ -21,7 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.8.0"
+WORKER_VERSION = "1.9.0" # [BUMPED] Support for Remote HTTP Sources
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
@@ -68,8 +69,6 @@ class QuotaTracker:
         self.lock = threading.Lock()
         self.current_usage = 0
         self.last_save = 0
-        
-        # Initial Load
         self._load()
 
     def _load(self):
@@ -81,7 +80,6 @@ class QuotaTracker:
                     if data.get('date') == today:
                         self.current_usage = data.get('bytes', 0)
                     else:
-                        # New day, reset
                         self.current_usage = 0
                         self._save()
             except:
@@ -97,10 +95,7 @@ class QuotaTracker:
         except: pass
 
     def check_cap(self):
-        """Returns True if cap is exceeded"""
         if self.limit_bytes <= 0: return False
-        
-        # Check for day rollover
         today = datetime.now().strftime("%Y-%m-%d")
         if os.path.exists(self.filename):
             try:
@@ -112,14 +107,12 @@ class QuotaTracker:
                             self._save()
                         return False
             except: pass
-
         return self.current_usage >= self.limit_bytes
 
     def add_usage(self, num_bytes):
         if self.limit_bytes <= 0: return
         with self.lock:
             self.current_usage += num_bytes
-            # Save every 50MB or 30 seconds to avoid disk spam
             if time.time() - self.last_save > 30:
                 self._save()
                 self.last_save = time.time()
@@ -134,7 +127,6 @@ class QuotaTracker:
         return f"{rem / 1024**3:.2f} GB"
     
     def get_wait_time(self):
-        """Returns seconds until midnight tomorrow"""
         now = datetime.now()
         tomorrow = now + timedelta(days=1)
         midnight = datetime(year=tomorrow.year, month=tomorrow.month, day=tomorrow.day, hour=0, minute=0, second=1)
@@ -259,6 +251,9 @@ def get_seconds(t):
         return h*3600 + m*60 + s
     except: return 0
 
+# ==============================================================================
+# FFMPEG MANAGEMENT
+# ==============================================================================
 
 def download_ffmpeg_windows():
     print("[*] FFmpeg not found. Downloading (approx 30-40MB)...")
@@ -278,49 +273,115 @@ def download_ffmpeg_windows():
                 raise Exception("Could not find ffmpeg.exe in downloaded zip")
             
             print("[*] Extracting FFmpeg...")
-            with open("ffmpeg.exe", "wb") as f:
-                f.write(z.read(ffmpeg_path))
-            with open("ffprobe.exe", "wb") as f:
-                f.write(z.read(ffprobe_path))
+            with open("ffmpeg.exe", "wb") as f: f.write(z.read(ffmpeg_path))
+            with open("ffprobe.exe", "wb") as f: f.write(z.read(ffprobe_path))
         print("[*] FFmpeg installed locally!")
         return True
     except Exception as e:
         print(f"[!] Auto-download failed: {e}")
         return False
 
-def check_ffmpeg():
-    global FFMPEG_CMD, FFPROBE_CMD
-    local_ffmpeg = os.path.abspath("ffmpeg.exe")
-    local_ffprobe = os.path.abspath("ffprobe.exe")
-    
-    if os.path.exists(local_ffmpeg) and os.path.exists(local_ffprobe):
-        FFMPEG_CMD = local_ffmpeg
-        FFPROBE_CMD = local_ffprobe
-    elif shutil.which("ffmpeg") and shutil.which("ffprobe"):
-        FFMPEG_CMD = "ffmpeg"
-        FFPROBE_CMD = "ffprobe"
+def download_ffmpeg_linux():
+    print("[*] Downloading static FFmpeg build (approx 40-80MB)...")
+    arch = platform.machine().lower()
+    if arch in ['x86_64', 'amd64']:
+        url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+    elif arch in ['aarch64', 'arm64']:
+        url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz"
     else:
-        if platform.system() == "Windows":
-            if download_ffmpeg_windows():
-                FFMPEG_CMD = local_ffmpeg
-                FFPROBE_CMD = local_ffprobe
-            else:
-                sys.exit(1)
-        else:
-            print("[!] Attempting to install ffmpeg...")
-            try: subprocess.run(["sudo", "apt-get", "install", "-y", "ffmpeg"], check=False)
-            except: pass
-            if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
-                print("[!] FFmpeg missing. Please install FFmpeg with libsvtav1.")
-                sys.exit(1)
+        print(f"[!] Unsupported architecture for auto-download: {arch}")
+        return False
 
     try:
-        res = subprocess.run([FFMPEG_CMD, "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        if "libsvtav1" not in res.stdout:
-            print("[!] FFmpeg found but missing libsvtav1 support.")
-            if platform.system() == 'Windows' and FFMPEG_CMD == 'ffmpeg':
-                 print("[!] HINT: You can delete the 'ffmpeg' from your PATH or let this script download a standalone version.")
-    except: pass
+        r = requests.get(url, stream=True)
+        r.raise_for_status()
+        
+        # Save to temporary file
+        tar_name = f"ffmpeg_static_{int(time.time())}.tar.xz"
+        with open(tar_name, 'wb') as f:
+             for chunk in r.iter_content(chunk_size=8192):
+                 f.write(chunk)
+        
+        print("[*] Extracting FFmpeg...")
+        # Create temp dir for extraction
+        ext_dir = f"temp_ffmpeg_ext_{int(time.time())}"
+        os.makedirs(ext_dir, exist_ok=True)
+        
+        with tarfile.open(tar_name, "r:xz") as tar:
+            tar.extractall(path=ext_dir)
+            
+        # Find binary and move it
+        found_ffmpeg = False
+        for root, dirs, files in os.walk(ext_dir):
+            for file in files:
+                if file == "ffmpeg":
+                    shutil.move(os.path.join(root, file), "ffmpeg")
+                    found_ffmpeg = True
+                elif file == "ffprobe":
+                    shutil.move(os.path.join(root, file), "ffprobe")
+
+        # Cleanup
+        if os.path.exists(tar_name): os.remove(tar_name)
+        if os.path.exists(ext_dir): shutil.rmtree(ext_dir)
+        
+        if found_ffmpeg:
+            os.chmod("ffmpeg", 0o755)
+            if os.path.exists("ffprobe"): os.chmod("ffprobe", 0o755)
+            print("[*] FFmpeg installed locally!")
+            return True
+        else:
+            print("[!] Could not find 'ffmpeg' binary in extracted archive.")
+            return False
+
+    except Exception as e:
+        print(f"[!] Linux Download failed: {e}")
+        return False
+
+def has_svtav1(cmd):
+    """Checks if the given ffmpeg command supports libsvtav1"""
+    try:
+        res = subprocess.run([cmd, "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        return "libsvtav1" in res.stdout
+    except:
+        return False
+
+def check_ffmpeg():
+    global FFMPEG_CMD, FFPROBE_CMD
+    
+    # 1. Check Local Static Build (Priority)
+    local_ffmpeg = os.path.abspath("ffmpeg.exe" if platform.system() == "Windows" else "./ffmpeg")
+    local_ffprobe = os.path.abspath("ffprobe.exe" if platform.system() == "Windows" else "./ffprobe")
+    
+    if os.path.exists(local_ffmpeg) and has_svtav1(local_ffmpeg):
+        FFMPEG_CMD = local_ffmpeg
+        if os.path.exists(local_ffprobe): FFPROBE_CMD = local_ffprobe
+        return
+
+    # 2. Check System FFmpeg
+    if shutil.which("ffmpeg") and has_svtav1("ffmpeg"):
+        FFMPEG_CMD = "ffmpeg"
+        FFPROBE_CMD = "ffprobe"
+        return
+
+    # 3. If we are here, we have no working FFmpeg. Attempt Download.
+    print("[!] Valid FFmpeg with libsvtav1 not found.")
+    
+    download_success = False
+    if platform.system() == "Windows":
+        download_success = download_ffmpeg_windows()
+    else:
+        download_success = download_ffmpeg_linux()
+        
+    if download_success:
+        # Re-verify local file
+        if os.path.exists(local_ffmpeg) and has_svtav1(local_ffmpeg):
+            FFMPEG_CMD = local_ffmpeg
+            if os.path.exists(local_ffprobe): FFPROBE_CMD = local_ffprobe
+            return
+
+    print("\n[CRITICAL ERROR] Could not find or download a version of FFmpeg with 'libsvtav1' support.")
+    print("Please install FFmpeg with SVT-AV1 support manually.")
+    sys.exit(1)
 
 def verify_connection(manager_url):
     try:
@@ -339,7 +400,6 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
         
     def post_status(status, progress=0, duration=0, error_msg=None):
         try:
-            # [MODIFIED] Send version
             payload = {
                 "worker_id": worker_id, 
                 "job_id": job_id, 
@@ -357,17 +417,13 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
              time.sleep(1); continue
 
         try:
-            # [QUOTA CHECK]
             if quota_tracker and quota_tracker.check_cap():
                 wait_sec = quota_tracker.get_wait_time()
                 update_status("Quota Limit")
                 log(worker_id, f"Daily Quota Reached. Reset in {wait_sec/3600:.1f} hours.")
-                
-                # Sleep in chunks to allow graceful exit
                 while wait_sec > 0 and not SHUTDOWN_EVENT.is_set():
                     time.sleep(min(60, wait_sec))
                     wait_sec -= 60
-                    # Re-check in case user deleted file
                     if not quota_tracker.check_cap(): break
                 continue
 
@@ -376,7 +432,6 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                 UPDATE_AVAILABLE = True; SHUTDOWN_EVENT.set(); break
 
             try: 
-                # [MODIFIED] Send version
                 params = {'worker_id': worker_id, 'version': WORKER_VERSION}
                 if series_id: params['series_id'] = series_id
                 r = requests.get(f"{manager_url}/get_job", params=params, headers=get_auth_headers(), timeout=10)
@@ -408,9 +463,7 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                                     while PAUSE_REQUESTED: time.sleep(1)
                                     if SHUTDOWN_EVENT.is_set(): raise Exception("Shutdown")
                                 
-                                # [QUOTA UPDATE]
                                 if quota_tracker: quota_tracker.add_usage(len(chunk))
-
                                 f.write(chunk)
                                 downloaded += len(chunk)
                                 pct = int((downloaded/total_size)*100) if total_size > 0 else 0
@@ -573,7 +626,6 @@ def run_worker(args):
     if not verify_connection(manager_url): sys.exit(1)
     if check_version(manager_url): apply_update(manager_url)
     
-    # [QUOTA TRACKER INIT]
     quota_tracker = None
     if args.daily_quota > 0:
         print(f"[*] Daily Quota Active: {args.daily_quota} GB")
