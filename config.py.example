@@ -1,17 +1,55 @@
 # Configuration for Distributed Encodes Manager
 
+# ==============================================================================
+# SERVER SETTINGS
+# ==============================================================================
 SERVER_HOST = '0.0.0.0'
 SERVER_PORT = 5000
-SERVER_URL_DISPLAY = "https://encode.fractumseraph.net/"
-ADMIN_USER = "admin"
-ADMIN_PASS = "changeme"  # CHANGE THIS!
 
+# The URL workers and users will use to access the manager
+# Example: "http://192.168.1.50:5000/" or "https://www.yourdomain.com/"
+SERVER_URL_DISPLAY = "https://encode.fractumseraph.net/"
+
+# ==============================================================================
+# AUTHENTICATION
+# ==============================================================================
+ADMIN_USER = "admin"
+ADMIN_PASS = "changeme"  # [!] CHANGE THIS!
+
+# Security Tokens (Generate new random strings for production)
+WORKER_SECRET = "ChangeThisToALongRandomString" 
+SECRET_KEY = "ChangeThisToAnotherRandomString"
+
+# ==============================================================================
+# FILE & DIRECTORY SETTINGS
+# ==============================================================================
+# Local folder to scan for source files
 SOURCE_DIRECTORY = "./source_media"
+
+# Folder where finished encodes will be saved
 COMPLETED_DIRECTORY = "./completed_media"
+
+# Remote HTTP Source (Optional)
+# If set, the manager will scan this URL for mp4/mkv files.
+# Workers v1.9.0+ will download directly from this URL.
+# Example: "http://192.168.1.100:8080/"
+# REMOTE_SOURCE_URL = "http://YOUR_WINDOWS_PC_IP:PORT/" 
+REMOTE_SOURCE_URL = None
+
 WORKER_TEMPLATE_FILE = "worker_template.py"
-DB_FILE = "encoding_jobs.db"
 VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov')
 
+# ==============================================================================
+# DATABASE SETTINGS
+# ==============================================================================
+DB_FILE = "encoding_jobs.db"
 
-WORKER_SECRET = "ChangeThisToALongRandomString"  # The API key from the old version of anyone still has that code somewhere
-SECRET_KEY = "ChangeThisToAnotherRandomString"
+# Database Mode:
+# 'disk' = Standard file-based.
+# 'ram'  = Load into Memory.
+DB_MODE = 'ram'
+
+# Write-Ahead Logging (WAL):
+# True  = Faster, better concurrency (Recommended for Local Disk & RAM)
+# False = Slower, strictly serial (Use ONLY if DB is on a Network Share/NAS)
+USE_WAL_MODE = True
