@@ -50,6 +50,7 @@ try:
     try: from config import USE_WAL_MODE
     except ImportError: USE_WAL_MODE = True
     
+    # [NEW] Hybrid Source Configuration
     try: from config import REMOTE_SOURCE_URL
     except ImportError: REMOTE_SOURCE_URL = None
 
@@ -107,6 +108,11 @@ def init_db():
         except sqlite3.OperationalError: pass
         try: cursor.execute("ALTER TABLE jobs ADD COLUMN worker_version TEXT")
         except sqlite3.OperationalError: pass
+        
+        # [NEW] Add source_type column (local/remote)
+        try: cursor.execute("ALTER TABLE jobs ADD COLUMN source_type TEXT DEFAULT 'local'")
+        except sqlite3.OperationalError: pass
+        
         conn.commit(); conn.close()
 
 def log_event(level, message, related_id=None):
@@ -136,13 +142,10 @@ def is_version_sufficient(client_ver, min_ver):
     """Compares two version strings (e.g., '1.9.0' vs '1.8.1'). Returns True if client >= min."""
     if not client_ver: return False
     try:
-        # Simple comparison for consistent format "X.Y.Z"
-        # For more complex versioning, use pkg_resources.parse_version
         c_parts = [int(x) for x in client_ver.split('.') if x.isdigit()]
         m_parts = [int(x) for x in min_ver.split('.') if x.isdigit()]
         return c_parts >= m_parts
-    except:
-        return False
+    except: return False
 
 @app.after_request
 def add_security_headers(response):
@@ -192,7 +195,7 @@ def verify_upload(filepath):
     except Exception as e: return False, str(e)
 
 # ==============================================================================
-# SCANNER LOGIC (LOCAL & REMOTE)
+# HYBRID SCANNER
 # ==============================================================================
 
 def scan_remote_http(url, prefix=""):
@@ -226,46 +229,53 @@ def scan_remote_http(url, prefix=""):
                 except: pass
                 
                 found.append((clean_id, clean_name, size))
-
     except Exception as e:
         print(f"[!] HTTP Scan Error on {url}: {e}")
-        
     return found
 
 def scan_and_queue():
-    found_files = []
+    files_to_add = [] # (id, filename, size, source_type)
     
+    # 1. Scan Local Source
+    print(f"[*] Scanning LOCAL Source: {SOURCE_DIRECTORY} ...")
+    if not os.path.exists(SOURCE_DIRECTORY): os.makedirs(SOURCE_DIRECTORY)
+    try:
+        for root, dirs, files in os.walk(SOURCE_DIRECTORY, topdown=True):
+            dirs.sort(); files.sort()
+            for file in files:
+                if file.lower().endswith(VIDEO_EXTENSIONS):
+                    rel_path = os.path.relpath(os.path.join(root, file), SOURCE_DIRECTORY)
+                    fsize = os.path.getsize(os.path.join(root, file))
+                    files_to_add.append((rel_path, file, fsize, 'local'))
+    except Exception as e: print(f"[!] Local Scanner error: {e}")
+
+    # 2. Scan Remote Source (if configured)
     if REMOTE_SOURCE_URL:
         print(f"[*] Scanning REMOTE Source: {REMOTE_SOURCE_URL} ...")
-        found_files = scan_remote_http(REMOTE_SOURCE_URL)
-    else:
-        print(f"[*] Scanning LOCAL Source: {SOURCE_DIRECTORY} ...")
-        if not os.path.exists(SOURCE_DIRECTORY): os.makedirs(SOURCE_DIRECTORY)
-        try:
-            for root, dirs, files in os.walk(SOURCE_DIRECTORY, topdown=True):
-                dirs.sort(); files.sort()
-                for file in files:
-                    if file.lower().endswith(VIDEO_EXTENSIONS):
-                        rel_path = os.path.relpath(os.path.join(root, file), SOURCE_DIRECTORY)
-                        fsize = os.path.getsize(os.path.join(root, file))
-                        found_files.append((rel_path, file, fsize))
-        except Exception as e: print(f"[!] Scanner error: {e}"); return
+        remote_files = scan_remote_http(REMOTE_SOURCE_URL)
+        for r_id, r_name, r_size in remote_files:
+            files_to_add.append((r_id, r_name, r_size, 'remote'))
 
+    # 3. Update Database
     count_new = 0
     with db_lock:
         conn = sqlite3.connect(DB_FILE, timeout=60)
         try:
             cursor = conn.cursor()
-            for rel_path, file, fsize in found_files:
-                cursor.execute("SELECT id FROM jobs WHERE id=?", (rel_path,))
+            for job_id, fname, fsize, src_type in files_to_add:
+                cursor.execute("SELECT id FROM jobs WHERE id=?", (job_id,))
                 if not cursor.fetchone():
-                    cursor.execute("INSERT INTO jobs (id, filename, status, last_updated, file_size) VALUES (?, ?, 'queued', ?, ?)", (rel_path, file, datetime.now(), fsize))
+                    cursor.execute(
+                        "INSERT INTO jobs (id, filename, status, last_updated, file_size, source_type) VALUES (?, ?, 'queued', ?, ?, ?)", 
+                        (job_id, fname, datetime.now(), fsize, src_type)
+                    )
                     count_new += 1
             conn.commit()
         finally: conn.close()
 
     if count_new > 0: log_event("INFO", f"Scanner found {count_new} new files.")
 
+    # 4. Refresh Queue (Memory)
     print("[*] Loading queue...")
     with db_lock:
         conn = sqlite3.connect(DB_FILE, timeout=60)
@@ -274,20 +284,13 @@ def scan_and_queue():
             cursor.execute("SELECT id, filename, file_size FROM jobs WHERE status = 'queued'")
             for row in cursor.fetchall():
                 if row[0] not in queued_job_ids:
-                    if REMOTE_SOURCE_URL:
-                        dl_link = urljoin(REMOTE_SOURCE_URL, quote(row[0]))
-                    else:
-                        dl_link = f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(row[0], safe='/')}"
-
-                    job_queue.put({
-                        "id": row[0], "filename": row[1], "file_size": row[2],
-                        "download_url": dl_link
-                    })
+                    # Note: Download URL is generated at assignment now, placeholder here
+                    job_queue.put({ "id": row[0], "filename": row[1], "file_size": row[2] })
                     queued_job_ids.add(row[0])
         finally: conn.close()
 
 def get_series_list():
-    if REMOTE_SOURCE_URL: return []
+    # Only works well for local folders structure
     try:
         if not os.path.exists(SOURCE_DIRECTORY): return []
         folders = sorted([d for d in os.listdir(SOURCE_DIRECTORY) if os.path.isdir(os.path.join(SOURCE_DIRECTORY, d))])
@@ -345,12 +348,13 @@ def get_job():
     worker_id = sanitize_input(request.args.get('worker_id'))
     worker_version = sanitize_input(request.args.get('version'))
     
-    # [NEW] Enforce version check for Remote HTTP jobs
-    if REMOTE_SOURCE_URL and not is_version_sufficient(worker_version, "1.9.0"):
-        return jsonify({"status": "empty"})
-
-    search_attempts = [series_id] if series_id and series_id.isdigit() else []
-    search_attempts.append(None) 
+    # Determine search strategy based on version
+    # 1. New Workers (>=1.9.0): Try Remote first, then Local
+    # 2. Old Workers: Only Local
+    search_phases = []
+    if REMOTE_SOURCE_URL and is_version_sufficient(worker_version, "1.9.0"):
+        search_phases.append('remote')
+    search_phases.append('local')
 
     try:
         with db_lock:
@@ -358,28 +362,38 @@ def get_job():
             try:
                 c = conn.cursor()
                 job = None
-                for current_search_id in search_attempts:
-                    folder_filter = None
-                    if current_search_id:
-                        for s in get_series_list():
-                            if s['id'] == int(current_search_id):
-                                folder_filter = s['folder']; break
+                
+                # Execute search phases
+                for source_type in search_phases:
+                    if job: break # Stop if found
                     
-                    params = []
-                    query_parts = ["status='queued'"]
-                    if max_size_mb and max_size_mb.isdigit():
-                        query_parts.append("file_size <= ?")
-                        params.append(int(max_size_mb) * 1024 * 1024)
-                    if folder_filter:
-                        query_parts.append("id LIKE ?")
-                        params.append(f"{folder_filter}%")
+                    search_attempts = [series_id] if series_id and series_id.isdigit() else []
+                    search_attempts.append(None) 
                     
-                    sql = f"SELECT id, filename, file_size FROM jobs WHERE {' AND '.join(query_parts)} ORDER BY id ASC LIMIT 1"
-                    c.execute(sql, tuple(params)); row = c.fetchone()
-                    if row: job = dict(row); break
+                    for current_search_id in search_attempts:
+                        folder_filter = None
+                        if current_search_id:
+                            for s in get_series_list():
+                                if s['id'] == int(current_search_id):
+                                    folder_filter = s['folder']; break
+                        
+                        params = [source_type]
+                        query_parts = ["status='queued'", "source_type=?"]
+                        
+                        if max_size_mb and max_size_mb.isdigit():
+                            query_parts.append("file_size <= ?")
+                            params.append(int(max_size_mb) * 1024 * 1024)
+                        if folder_filter:
+                            query_parts.append("id LIKE ?")
+                            params.append(f"{folder_filter}%")
+                        
+                        sql = f"SELECT id, filename, file_size, source_type FROM jobs WHERE {' AND '.join(query_parts)} ORDER BY id ASC LIMIT 1"
+                        c.execute(sql, tuple(params)); row = c.fetchone()
+                        if row: job = dict(row); break
                 
                 if job:
-                    if REMOTE_SOURCE_URL:
+                    # Generate URL based on source type
+                    if job['source_type'] == 'remote' and REMOTE_SOURCE_URL:
                          job['download_url'] = urljoin(REMOTE_SOURCE_URL, quote(job['id']))
                     else:
                          job['download_url'] = f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(job['id'], safe='/')}"
