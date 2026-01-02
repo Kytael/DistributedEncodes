@@ -10,6 +10,7 @@ import shutil
 import traceback
 import uuid
 import secrets
+import platform
 from functools import wraps
 from datetime import datetime, timedelta
 from urllib.parse import quote, urljoin
@@ -50,9 +51,12 @@ try:
     try: from config import USE_WAL_MODE
     except ImportError: USE_WAL_MODE = True
     
-    # [NEW] Hybrid Source Configuration
     try: from config import REMOTE_SOURCE_URL
     except ImportError: REMOTE_SOURCE_URL = None
+
+    # [NEW] Load DB_MODE
+    try: from config import DB_MODE
+    except ImportError: DB_MODE = 'disk'
 
 except ImportError:
     print("[!] Critical Error: config.py not found.")
@@ -74,46 +78,86 @@ queued_job_ids = set()
 db_lock = threading.Lock()
 
 # ==============================================================================
-# DATABASE & LOGGING
+# ADVANCED DATABASE HANDLER (RAM/DISK)
 # ==============================================================================
 
-def init_db():
-    with db_lock:
-        conn = sqlite3.connect(DB_FILE, timeout=60)
+class DatabaseHandler:
+    def __init__(self, disk_path, mode):
+        self.disk_path = os.path.abspath(disk_path)
+        self.mode = mode
+        self.active_db_path = self.disk_path
+        
+        # Determine RAM path based on OS
+        if self.mode == 'ram':
+            if platform.system() == 'Linux' and os.path.exists('/dev/shm'):
+                self.ram_path = os.path.join('/dev/shm', os.path.basename(self.disk_path))
+                print(f"[*] DB Mode: RAM (Shared Memory at {self.ram_path})")
+                self._load_to_ram()
+                self.active_db_path = self.ram_path
+                # Start Sync Thread
+                threading.Thread(target=self._background_sync_loop, daemon=True).start()
+            else:
+                print("[!] DB Mode: RAM requested but not supported on this OS/Config. Falling back to DISK.")
+                self.mode = 'disk'
+
+    def _load_to_ram(self):
+        """Copies Disk DB to RAM at startup."""
+        with db_lock:
+            # Ensure disk file exists to copy
+            if not os.path.exists(self.disk_path):
+                open(self.disk_path, 'a').close()
+            
+            # Copy to RAM
+            shutil.copy2(self.disk_path, self.ram_path)
+            
+            # Set permissions
+            try: os.chmod(self.ram_path, 0o666)
+            except: pass
+
+    def sync_to_disk(self):
+        """Safely backups RAM DB to Disk using SQLite Backup API."""
+        if self.mode != 'ram': return
+        
+        # Don't grab the main lock; backup API handles concurrency well enough
+        # or uses its own locking. We just need to connect.
+        try:
+            source_conn = sqlite3.connect(self.active_db_path)
+            dest_conn = sqlite3.connect(self.disk_path)
+            
+            with source_conn:
+                source_conn.backup(dest_conn)
+            
+            dest_conn.close()
+            source_conn.close()
+            # print("[*] DB Synced to Disk") 
+        except Exception as e:
+            print(f"[!] DB Sync Failed: {e}")
+
+    def _background_sync_loop(self):
+        while True:
+            time.sleep(60) # Sync every 60 seconds
+            self.sync_to_disk()
+
+    def get_connection(self):
+        """Returns a connection to the currently active DB (RAM or Disk)."""
+        conn = sqlite3.connect(self.active_db_path, timeout=60)
+        
+        # Enable WAL for concurrency (Works in /dev/shm too)
         if USE_WAL_MODE:
             try: conn.execute("PRAGMA journal_mode=WAL;")
             except: pass
         else:
             try: conn.execute("PRAGMA journal_mode=DELETE;")
             except: pass
-        
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY, filename TEXT, status TEXT, worker_id TEXT,
-                progress INTEGER DEFAULT 0, duration INTEGER DEFAULT 0, last_updated TIMESTAMP,
-                started_at TIMESTAMP, file_size INTEGER DEFAULT 0
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS system_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TIMESTAMP,
-                level TEXT,
-                message TEXT,
-                related_id TEXT
-            )
-        ''')
-        try: cursor.execute("ALTER TABLE jobs ADD COLUMN file_size INTEGER DEFAULT 0")
-        except sqlite3.OperationalError: pass
-        try: cursor.execute("ALTER TABLE jobs ADD COLUMN worker_version TEXT")
-        except sqlite3.OperationalError: pass
-        
-        # [NEW] Add source_type column (local/remote)
-        try: cursor.execute("ALTER TABLE jobs ADD COLUMN source_type TEXT DEFAULT 'local'")
-        except sqlite3.OperationalError: pass
-        
-        conn.commit(); conn.close()
+            
+        return conn
+
+# Initialize the Handler
+db_handler = DatabaseHandler(DB_FILE, DB_MODE)
+
+# ==============================================================================
+# LOGGING
+# ==============================================================================
 
 def log_event(level, message, related_id=None):
     try:
@@ -122,7 +166,7 @@ def log_event(level, message, related_id=None):
         if clean_id: clean_id = re.sub(r'[^a-zA-Z0-9_.-]', '', clean_id)
         
         with db_lock:
-            conn = sqlite3.connect(DB_FILE, timeout=60)
+            conn = db_handler.get_connection()
             conn.execute("INSERT INTO system_logs (timestamp, level, message, related_id) VALUES (?, ?, ?, ?)",
                          (datetime.now(), level, clean_msg, clean_id))
             conn.commit(); conn.close()
@@ -139,7 +183,6 @@ def sanitize_input(val):
     return re.sub(r'[^a-zA-Z0-9_.-]', '', str(val))
 
 def is_version_sufficient(client_ver, min_ver):
-    """Compares two version strings (e.g., '1.9.0' vs '1.8.1'). Returns True if client >= min."""
     if not client_ver: return False
     try:
         c_parts = [int(x) for x in client_ver.split('.') if x.isdigit()]
@@ -195,48 +238,68 @@ def verify_upload(filepath):
     except Exception as e: return False, str(e)
 
 # ==============================================================================
-# HYBRID SCANNER
+# DATABASE INIT & SCANNER
 # ==============================================================================
 
+def init_db():
+    with db_lock:
+        conn = db_handler.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY, filename TEXT, status TEXT, worker_id TEXT,
+                progress INTEGER DEFAULT 0, duration INTEGER DEFAULT 0, last_updated TIMESTAMP,
+                started_at TIMESTAMP, file_size INTEGER DEFAULT 0, source_type TEXT DEFAULT 'local'
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS system_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TIMESTAMP,
+                level TEXT,
+                message TEXT,
+                related_id TEXT
+            )
+        ''')
+        try: cursor.execute("ALTER TABLE jobs ADD COLUMN file_size INTEGER DEFAULT 0")
+        except sqlite3.OperationalError: pass
+        try: cursor.execute("ALTER TABLE jobs ADD COLUMN worker_version TEXT")
+        except sqlite3.OperationalError: pass
+        try: cursor.execute("ALTER TABLE jobs ADD COLUMN source_type TEXT DEFAULT 'local'")
+        except sqlite3.OperationalError: pass
+        
+        conn.commit(); conn.close()
+
 def scan_remote_http(url, prefix=""):
-    """Recursively scans an HTTP directory listing for video files."""
     found = []
     try:
         headers = {'User-Agent': 'FractumManager/1.0'}
         r = requests.get(url, headers=headers, timeout=10)
         if r.status_code != 200: return []
-        
         links = re.findall(r'href=["\']([^"\'<>]+)["\']', r.text)
-        
         for link in links:
             if link.startswith('?') or link.startswith('/') or link in ['../', './']: continue
             if "parent directory" in link.lower(): continue
-            
             full_url = urljoin(url, link)
-            
             if link.endswith('/'):
-                new_prefix = f"{prefix}{link}"
-                found.extend(scan_remote_http(full_url, prefix=new_prefix))
+                found.extend(scan_remote_http(full_url, prefix=f"{prefix}{link}"))
             elif any(link.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
                 from urllib.parse import unquote
                 clean_name = unquote(link)
                 clean_id = f"{prefix}{clean_name}"
-                
                 size = 0
                 try:
                     h = requests.head(full_url, headers=headers, timeout=5)
                     size = int(h.headers.get('content-length', 0))
                 except: pass
-                
                 found.append((clean_id, clean_name, size))
-    except Exception as e:
-        print(f"[!] HTTP Scan Error on {url}: {e}")
+    except Exception as e: print(f"[!] HTTP Scan Error on {url}: {e}")
     return found
 
 def scan_and_queue():
-    files_to_add = [] # (id, filename, size, source_type)
+    files_to_add = [] 
     
-    # 1. Scan Local Source
+    # 1. Scan Local
     print(f"[*] Scanning LOCAL Source: {SOURCE_DIRECTORY} ...")
     if not os.path.exists(SOURCE_DIRECTORY): os.makedirs(SOURCE_DIRECTORY)
     try:
@@ -249,17 +312,17 @@ def scan_and_queue():
                     files_to_add.append((rel_path, file, fsize, 'local'))
     except Exception as e: print(f"[!] Local Scanner error: {e}")
 
-    # 2. Scan Remote Source (if configured)
+    # 2. Scan Remote
     if REMOTE_SOURCE_URL:
         print(f"[*] Scanning REMOTE Source: {REMOTE_SOURCE_URL} ...")
         remote_files = scan_remote_http(REMOTE_SOURCE_URL)
         for r_id, r_name, r_size in remote_files:
             files_to_add.append((r_id, r_name, r_size, 'remote'))
 
-    # 3. Update Database
+    # 3. Update DB
     count_new = 0
     with db_lock:
-        conn = sqlite3.connect(DB_FILE, timeout=60)
+        conn = db_handler.get_connection()
         try:
             cursor = conn.cursor()
             for job_id, fname, fsize, src_type in files_to_add:
@@ -275,22 +338,23 @@ def scan_and_queue():
 
     if count_new > 0: log_event("INFO", f"Scanner found {count_new} new files.")
 
-    # 4. Refresh Queue (Memory)
+    # 4. Refresh Queue
     print("[*] Loading queue...")
     with db_lock:
-        conn = sqlite3.connect(DB_FILE, timeout=60)
+        conn = db_handler.get_connection()
         try:
             cursor = conn.cursor()
             cursor.execute("SELECT id, filename, file_size FROM jobs WHERE status = 'queued'")
             for row in cursor.fetchall():
                 if row[0] not in queued_job_ids:
-                    # Note: Download URL is generated at assignment now, placeholder here
-                    job_queue.put({ "id": row[0], "filename": row[1], "file_size": row[2] })
+                    if REMOTE_SOURCE_URL: dl_link = urljoin(REMOTE_SOURCE_URL, quote(row[0]))
+                    else: dl_link = f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(row[0], safe='/')}"
+                    job_queue.put({ "id": row[0], "filename": row[1], "file_size": row[2], "download_url": dl_link })
                     queued_job_ids.add(row[0])
         finally: conn.close()
 
 def get_series_list():
-    # Only works well for local folders structure
+    if REMOTE_SOURCE_URL: return []
     try:
         if not os.path.exists(SOURCE_DIRECTORY): return []
         folders = sorted([d for d in os.listdir(SOURCE_DIRECTORY) if os.path.isdir(os.path.join(SOURCE_DIRECTORY, d))])
@@ -348,51 +412,41 @@ def get_job():
     worker_id = sanitize_input(request.args.get('worker_id'))
     worker_version = sanitize_input(request.args.get('version'))
     
-    # Determine search strategy based on version
-    # 1. New Workers (>=1.9.0): Try Remote first, then Local
-    # 2. Old Workers: Only Local
+    if REMOTE_SOURCE_URL and not is_version_sufficient(worker_version, "1.9.0"):
+        return jsonify({"status": "empty"})
+
     search_phases = []
-    if REMOTE_SOURCE_URL and is_version_sufficient(worker_version, "1.9.0"):
-        search_phases.append('remote')
+    if REMOTE_SOURCE_URL and is_version_sufficient(worker_version, "1.9.0"): search_phases.append('remote')
     search_phases.append('local')
 
     try:
         with db_lock:
-            conn = sqlite3.connect(DB_FILE, timeout=60); conn.row_factory = sqlite3.Row
+            conn = db_handler.get_connection(); conn.row_factory = sqlite3.Row
             try:
                 c = conn.cursor()
                 job = None
-                
-                # Execute search phases
                 for source_type in search_phases:
-                    if job: break # Stop if found
-                    
+                    if job: break
                     search_attempts = [series_id] if series_id and series_id.isdigit() else []
                     search_attempts.append(None) 
-                    
                     for current_search_id in search_attempts:
                         folder_filter = None
                         if current_search_id:
                             for s in get_series_list():
-                                if s['id'] == int(current_search_id):
-                                    folder_filter = s['folder']; break
+                                if s['id'] == int(current_search_id): folder_filter = s['folder']; break
                         
                         params = [source_type]
                         query_parts = ["status='queued'", "source_type=?"]
-                        
                         if max_size_mb and max_size_mb.isdigit():
-                            query_parts.append("file_size <= ?")
-                            params.append(int(max_size_mb) * 1024 * 1024)
+                            query_parts.append("file_size <= ?"); params.append(int(max_size_mb) * 1024 * 1024)
                         if folder_filter:
-                            query_parts.append("id LIKE ?")
-                            params.append(f"{folder_filter}%")
+                            query_parts.append("id LIKE ?"); params.append(f"{folder_filter}%")
                         
                         sql = f"SELECT id, filename, file_size, source_type FROM jobs WHERE {' AND '.join(query_parts)} ORDER BY id ASC LIMIT 1"
                         c.execute(sql, tuple(params)); row = c.fetchone()
                         if row: job = dict(row); break
                 
                 if job:
-                    # Generate URL based on source type
                     if job['source_type'] == 'remote' and REMOTE_SOURCE_URL:
                          job['download_url'] = urljoin(REMOTE_SOURCE_URL, quote(job['id']))
                     else:
@@ -428,7 +482,7 @@ def upload_result():
             log_event("WARN", f"Security: Upload rejected ({reason})", job_id)
             os.remove(temp_path)
             with db_lock:
-                conn = sqlite3.connect(DB_FILE, timeout=60)
+                conn = db_handler.get_connection()
                 conn.execute("UPDATE jobs SET status='failed', last_updated=? WHERE id=?", (datetime.now(), job_id))
                 conn.commit(); conn.close()
             return jsonify({"status": "error", "message": reason}), 400
@@ -441,10 +495,14 @@ def upload_result():
         shutil.move(temp_path, save_path) 
 
         with db_lock:
-            conn = sqlite3.connect(DB_FILE, timeout=60)
+            conn = db_handler.get_connection()
             conn.execute("UPDATE jobs SET status='completed', progress=100, worker_id=?, last_updated=?, duration=? WHERE id=?", 
                 (worker_id, datetime.now(), duration, job_id))
             conn.commit(); conn.close()
+        
+        # [CRITICAL] Immediate Sync to Disk to prevent data loss
+        db_handler.sync_to_disk()
+        
         log_event("INFO", f"Job completed by {worker_id}", job_id)
         return jsonify({"status": "success"})
     return jsonify({"status": "error"}), 400
@@ -460,7 +518,7 @@ def report_status():
     if status == 'failed': log_event("WARN", f"Worker {worker_id} (v{worker_version}) reported failure", d.get('job_id'))
 
     with db_lock:
-        conn = sqlite3.connect(DB_FILE, timeout=60)
+        conn = db_handler.get_connection()
         try:
             sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=? WHERE id=?"
             params = [status, worker_id, d.get('progress',0), datetime.now(), d.get('job_id')]
@@ -477,7 +535,7 @@ def api_stats():
     time_filter = " AND last_updated > datetime('now', '-1 day')" if filter_val == '24h' else " AND last_updated > datetime('now', '-30 days')" if filter_val == '30d' else ""
 
     with db_lock:
-        conn = sqlite3.connect(DB_FILE, timeout=60); conn.row_factory = sqlite3.Row
+        conn = db_handler.get_connection(); conn.row_factory = sqlite3.Row
         try:
             c = conn.cursor()
             c.execute(f"SELECT CASE WHEN instr(worker_id, '-') > 0 THEN substr(worker_id, 1, instr(worker_id, '-') - 1) ELSE worker_id END as worker_id, SUM(duration) as total_minutes, COUNT(*) as files_count FROM jobs WHERE status='completed' AND worker_id IS NOT NULL {time_filter} GROUP BY 1 ORDER BY total_minutes DESC")
@@ -500,7 +558,7 @@ def api_stats():
 @requires_auth
 def api_all_jobs():
     with db_lock:
-        conn = sqlite3.connect(DB_FILE, timeout=60); conn.row_factory = sqlite3.Row
+        conn = db_handler.get_connection(); conn.row_factory = sqlite3.Row
         try:
             c = conn.cursor()
             c.execute("SELECT id, status, worker_id, worker_version, last_updated FROM jobs ORDER BY last_updated DESC")
@@ -513,7 +571,7 @@ def api_all_jobs():
 def get_logs():
     limit = request.args.get('limit', 100)
     with db_lock:
-        conn = sqlite3.connect(DB_FILE, timeout=60); conn.row_factory = sqlite3.Row
+        conn = db_handler.get_connection(); conn.row_factory = sqlite3.Row
         try:
             c = conn.cursor()
             c.execute("SELECT * FROM system_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
@@ -528,7 +586,7 @@ def admin_action():
     log_event("WARN", f"Admin performed '{action}' on job", job_id)
     
     with db_lock:
-        conn = sqlite3.connect(DB_FILE, timeout=60); c = conn.cursor()
+        conn = db_handler.get_connection(); c = conn.cursor()
         try:
             if action == 'delete': c.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             elif action == 'retry': c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=? WHERE id=?", (datetime.now(), job_id))
@@ -557,7 +615,7 @@ def maintenance_loop():
         try:
             logs_to_write = [] 
             with db_lock:
-                conn = sqlite3.connect(DB_FILE, timeout=60); cursor = conn.cursor()
+                conn = db_handler.get_connection(); cursor = conn.cursor()
                 try:
                     now = datetime.now()
                     cursor.execute("SELECT id, filename, last_updated, worker_id FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
