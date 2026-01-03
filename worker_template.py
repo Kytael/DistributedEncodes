@@ -282,18 +282,22 @@ def download_ffmpeg_windows():
         return False
 
 def download_ffmpeg_linux():
-    print("[*] Downloading static FFmpeg build (approx 40-80MB)...")
+    print("[*] Downloading static FFmpeg build (BtbN) (approx 40-80MB)...")
     arch = platform.machine().lower()
+    
+    # Use BtbN builds which definitely have libsvtav1 support
     if arch in ['x86_64', 'amd64']:
-        url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+        url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
     elif arch in ['aarch64', 'arm64']:
+        # Fallback to JVS for ARM as BtbN ARM builds are less consistent/available in the same structure
         url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz"
     else:
         print(f"[!] Unsupported architecture for auto-download: {arch}")
         return False
 
     try:
-        r = requests.get(url, stream=True)
+        # Follow redirects (GitHub releases redirect)
+        r = requests.get(url, stream=True, allow_redirects=True)
         r.raise_for_status()
         
         # Save to temporary file
@@ -307,10 +311,11 @@ def download_ffmpeg_linux():
         ext_dir = f"temp_ffmpeg_ext_{int(time.time())}"
         os.makedirs(ext_dir, exist_ok=True)
         
+        # Extract .tar.xz
         with tarfile.open(tar_name, "r:xz") as tar:
             tar.extractall(path=ext_dir)
             
-        # Find binary and move it
+        # Recursive search for the binary (BtbN puts it in a subdirectory)
         found_ffmpeg = False
         for root, dirs, files in os.walk(ext_dir):
             for file in files:
