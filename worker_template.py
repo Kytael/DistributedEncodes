@@ -307,7 +307,7 @@ def download_ffmpeg_windows():
     
     urls = [
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
-        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z"
+        "https://vsv.fractumseraph.net/ffmpeg-master-latest-win64-gpl.zip"
     ]
     
     temp_zip = "ffmpeg_temp.zip"
