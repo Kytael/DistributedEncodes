@@ -400,4 +400,423 @@ def check_ffmpeg():
         return
 
     # 3. If we are here, we have no working FFmpeg. Attempt Download.
-    print("[!] Valid FFmpeg with lib
+    print("[!] Valid FFmpeg with libsvtav1 not found.")
+    
+    download_success = False
+    if platform.system() == "Windows":
+        download_success = download_ffmpeg_windows()
+    else:
+        download_success = download_ffmpeg_linux()
+        
+    if download_success:
+        # Re-verify local file
+        if os.path.exists(local_ffmpeg) and has_svtav1(local_ffmpeg):
+            FFMPEG_CMD = local_ffmpeg
+            if os.path.exists(local_ffprobe): FFPROBE_CMD = local_ffprobe
+            return
+
+    print("\n[CRITICAL ERROR] Could not find or download a version of FFmpeg with 'libsvtav1' support.")
+    print("Please install FFmpeg with SVT-AV1 support manually.")
+    sys.exit(1)
+
+def verify_connection(manager_url):
+    try:
+        if requests.get(manager_url, timeout=10).status_code < 400: return True
+    except: pass
+    print(f"[!] Could not connect to {manager_url}"); return False
+
+
+def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=False, series_id=None):
+    global UPDATE_AVAILABLE
+    log(worker_id, "Thread active.")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    def update_status(msg):
+        with PROGRESS_LOCK: WORKER_PROGRESS[worker_id] = msg
+        
+    def post_status(status, progress=0, duration=0, error_msg=None):
+        try:
+            payload = {
+                "worker_id": worker_id, 
+                "job_id": job_id, 
+                "status": status, 
+                "progress": progress,
+                "version": WORKER_VERSION
+            }
+            if duration > 0: payload["duration"] = duration
+            if error_msg: payload["error"] = error_msg
+            requests.post(f"{manager_url}/report_status", json=payload, headers=get_auth_headers(), timeout=10)
+        except: pass
+
+    while not SHUTDOWN_EVENT.is_set():
+        if PAUSE_REQUESTED:
+             time.sleep(1); continue
+
+        try:
+            if quota_tracker and quota_tracker.check_cap():
+                wait_sec = quota_tracker.get_wait_time()
+                update_status("Quota Limit")
+                log(worker_id, f"Daily Quota Reached. Reset in {wait_sec/3600:.1f} hours.")
+                while wait_sec > 0 and not SHUTDOWN_EVENT.is_set():
+                    time.sleep(min(60, wait_sec))
+                    wait_sec -= 60
+                    if not quota_tracker.check_cap(): break
+                continue
+
+            update_status("Idle")
+            if check_version(manager_url):
+                UPDATE_AVAILABLE = True; SHUTDOWN_EVENT.set(); break
+
+            try: 
+                params = {'worker_id': worker_id, 'version': WORKER_VERSION}
+                if series_id: params['series_id'] = series_id
+                r = requests.get(f"{manager_url}/get_job", params=params, headers=get_auth_headers(), timeout=10)
+            except: time.sleep(5); continue
+
+            data = r.json() if r.status_code == 200 else None
+            
+            if r.status_code == 401:
+                log(worker_id, "AUTH FAILED: Worker Secret is invalid or missing.", "CRITICAL")
+                SHUTDOWN_EVENT.set(); break
+
+            if data and data.get("status") == "ok":
+                job = data["job"]; job_id = job['id']; dl_url = job['download_url']
+                log(worker_id, f"Job: {job['filename']}")
+                
+                local_src = os.path.join(temp_dir, "source.tmp")
+                local_dst = os.path.join(temp_dir, f"encoded{ENCODING_CONFIG['OUTPUT_EXT']}")
+                
+                post_status("downloading", 0)
+                
+                try:
+                    with requests.get(dl_url, stream=True, timeout=30) as r:
+                        r.raise_for_status()
+                        total_size = int(r.headers.get('content-length', 0))
+                        downloaded = 0; last_rep = 0
+                        with open(local_src, 'wb') as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                if PAUSE_REQUESTED: 
+                                    while PAUSE_REQUESTED: time.sleep(1)
+                                    if SHUTDOWN_EVENT.is_set(): raise Exception("Shutdown")
+                                
+                                if quota_tracker: quota_tracker.add_usage(len(chunk))
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                pct = int((downloaded/total_size)*100) if total_size > 0 else 0
+                                
+                                if single_mode: print_progress(worker_id, downloaded, total_size, prefix='DL')
+                                else: update_status(f"DL {pct}%")
+
+                                if time.time() - last_rep > 30:
+                                    post_status("downloading", pct)
+                                    last_rep = time.time()
+                    
+                    if quota_tracker: quota_tracker.force_save()
+                    if single_mode: print_progress(worker_id, total_size, total_size, prefix='DL', suffix='OK')
+
+                except Exception as e:
+                    err_msg = str(e)
+                    log(worker_id, f"Download failed: {err_msg}", "ERROR")
+                    post_status("failed", error_msg=err_msg)
+                    time.sleep(5); continue
+
+                update_status("Probing")
+                total_sec = 0; total_min = 0; audio_index = 0; subtitle_indices = []
+                try:
+                    cmd_probe = [FFPROBE_CMD, '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', local_src]
+                    res = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    probe_data = json.loads(res.stdout)
+                    dur = probe_data.get('format', {}).get('duration')
+                    if dur: total_sec = float(dur); total_min = int(total_sec / 60)
+                    
+                    audio_streams = [s for s in probe_data.get('streams', []) if s['codec_type'] == 'audio']
+                    if audio_streams:
+                        audio_index = audio_streams[0]['index']
+                        for s in audio_streams:
+                            if s.get('tags', {}).get('language', '').lower() in ['eng', 'en', 'english']:
+                                audio_index = s['index']; break
+                    for s in probe_data.get('streams', []):
+                        if s['codec_type'] == 'subtitle':
+                            if s.get('codec_name', '').lower() in ['subrip', 'ass', 'webvtt', 'mov_text', 'text', 'srt', 'ssa']:
+                                subtitle_indices.append(s['index'])
+                except: pass
+
+                log(worker_id, f"Encoding ({total_min}m)...")
+                post_status("processing", 0, total_min)
+                
+                cmd = [FFMPEG_CMD, '-y', '-i', local_src, '-map', '0:v:0', '-map', f'0:{audio_index}']
+                for idx in subtitle_indices: cmd.extend(['-map', f'0:{idx}'])
+                cmd.extend(['-c:v', ENCODING_CONFIG["VIDEO_CODEC"], '-preset', ENCODING_CONFIG["VIDEO_PRESET"], '-crf', ENCODING_CONFIG["VIDEO_CRF"], '-pix_fmt', ENCODING_CONFIG["VIDEO_PIX_FMT"], '-vf', ENCODING_CONFIG["VIDEO_SCALE"], '-c:a', ENCODING_CONFIG["AUDIO_CODEC"], '-b:a', ENCODING_CONFIG["AUDIO_BITRATE"], '-ac', ENCODING_CONFIG["AUDIO_CHANNELS"], '-c:s', ENCODING_CONFIG["SUBTITLE_CODEC"], '-progress', 'pipe:1', local_dst])
+                
+                start_enc = time.time(); last_rep = 0
+                
+                popen_kwargs = {}
+                if platform.system() == 'Windows':
+                    popen_kwargs['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP
+                else:
+                    popen_kwargs['start_new_session'] = True
+
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True, **popen_kwargs)
+                
+                with PROC_LOCK: ACTIVE_PROCS[worker_id] = proc
+                
+                while True:
+                    if PAUSE_REQUESTED:
+                        time.sleep(0.2); continue
+
+                    line = proc.stdout.readline()
+                    if not line and proc.poll() is not None: break
+                    
+                    if "out_time=" in line and "N/A" not in line and total_sec > 0:
+                        try:
+                            time_str = line.split('=')[1].strip()
+                            curr_sec = get_seconds(time_str)
+                            pct = int((curr_sec/total_sec)*100)
+                            
+                            if single_mode: print_progress(worker_id, curr_sec, total_sec, prefix='Enc')
+                            else: update_status(f"Enc {pct}%")
+                            
+                            if time.time() - last_rep > 10:
+                                post_status("processing", pct)
+                                last_rep = time.time()
+                        except: pass
+                
+                with PROC_LOCK:
+                    if worker_id in ACTIVE_PROCS: del ACTIVE_PROCS[worker_id]
+
+                enc_time = time.time() - start_enc
+                if single_mode: print_progress(worker_id, total_sec, total_sec, prefix='Enc', suffix='OK')
+
+                if proc.returncode == 0 and os.path.exists(local_dst):
+                    final_size = os.path.getsize(local_dst) / 1024 / 1024
+                    log(worker_id, f"Encode done ({enc_time:.0f}s, {final_size:.2f}MB). Uploading...")
+                    post_status("uploading", 0)
+                    
+                    class ProgressFileReader:
+                        def __init__(self, filename, callback):
+                            self._f = open(filename, 'rb'); self._total = os.path.getsize(filename)
+                            self._read = 0; self._callback = callback; self._last_time = 0
+                        def __enter__(self): return self
+                        def __exit__(self, exc_type, exc_val, exc_tb): self._f.close()
+                        def read(self, size=-1):
+                            if PAUSE_REQUESTED:
+                                while PAUSE_REQUESTED: time.sleep(1)
+                            data = self._f.read(size); self._read += len(data)
+                            pct = int((self._read / self._total) * 100)
+                            if single_mode: print_progress(worker_id, self._read, self._total, prefix='Up')
+                            else: update_status(f"Up {pct}%")
+                            if time.time() - self._last_time > 30:
+                                self._callback(pct); self._last_time = time.time()
+                            return data
+                        def __getattr__(self, attr): return getattr(self._f, attr)
+
+                    def upload_cb(pct): post_status("uploading", pct)
+
+                    with ProgressFileReader(local_dst, upload_cb) as f:
+                        requests.post(f"{manager_url}/upload_result", 
+                                      files={'file': (job_id, f)}, 
+                                      data={'job_id': job_id, 'worker_id': worker_id, 'duration': total_min},
+                                      headers=get_auth_headers())
+                    
+                    if single_mode: print_progress(worker_id, 100, 100, prefix='Up', suffix='OK')
+                    log(worker_id, "Job complete.")
+                else:
+                    err_msg = f"FFmpeg exited with code {proc.returncode}"
+                    if SHUTDOWN_EVENT.is_set(): err_msg = "Aborted by user/update"
+                    
+                    log(worker_id, err_msg, "ERROR")
+                    post_status("failed", error_msg=err_msg)
+
+                if os.path.exists(local_src): os.remove(local_src)
+                if os.path.exists(local_dst): os.remove(local_dst)
+            else:
+                if single_mode:
+                    with CONSOLE_LOCK:
+                        sys.stdout.write(f"\033[2K\r[{datetime.now().strftime('%H:%M:%S')}] [{worker_id}] Idle. Waiting...")
+                        sys.stdout.flush()
+                time.sleep(10)
+        except Exception as e:
+            err_str = str(e)
+            log(worker_id, f"Error: {err_str}", "CRITICAL")
+            try: 
+                if 'job_id' in locals(): post_status("failed", error_msg=err_str)
+            except: pass
+            time.sleep(10)
+
+def run_worker(args):
+    print("==================================================")
+    print(" FRACTUM DISTRIBUTED WORKER")
+    print("==================================================")
+
+    # --- [START] CONFIGURATION LOGIC ---
+    config_file = "worker_config.json"
+    saved_config = {}
+    
+    # 1. Try to load existing config
+    if os.path.exists(config_file):
+        try:
+            with open(config_file, 'r') as f:
+                # [FIX] Handle empty or whitespace-only files
+                content = f.read().strip()
+                if content:
+                    saved_config = json.loads(content)
+                else:
+                    print("[!] Config file is empty. Resetting.")
+                    f.close() # Ensure close before delete
+                    os.remove(config_file)
+                    
+                # Apply saved config IF the user didn't override via CLI flags
+                if args.username == DEFAULT_USERNAME and 'username' in saved_config:
+                    args.username = saved_config['username']
+                if args.workername == DEFAULT_WORKERNAME and 'workername' in saved_config:
+                    args.workername = saved_config['workername']
+        except json.JSONDecodeError:
+            print("[!] Config file corrupted. Resetting.")
+            os.remove(config_file)
+        except Exception as e:
+            print(f"[!] Warning: Could not read config file: {e}")
+
+    # 2. Interactive Setup (Only if using defaults and running in a terminal)
+    # We check sys.stdin.isatty() so we don't hang Docker/Headless servers
+    if sys.stdin.isatty():
+        config_changed = False
+        
+        # Ask for Username if still default
+        if args.username == DEFAULT_USERNAME:
+            print("\n[*] First Time Setup detected.")
+            print("    Please enter the USERNAME of the person running the program.")
+            print("    (e.g., 'FractumSeraph', 'John Smith')")
+            u_input = input(f"    Enter Username (Default: {DEFAULT_USERNAME}): ").strip()
+            if u_input:
+                args.username = u_input
+                config_changed = True
+        
+        # Ask for Workername if still default
+        if args.workername == DEFAULT_WORKERNAME:
+            w_default = f"Node-{int(time.time())}"
+            print("\n    Please enter a name for THIS COMPUTER.")
+            print("    (e.g., 'Fractums Laptop', 'Johns Gaming PC')")
+            w_input = input(f"    Enter Worker Name (Default: {w_default}): ").strip()
+            if w_input:
+                args.workername = w_input
+            else:
+                args.workername = w_default
+            config_changed = True
+
+        # 3. Save Config if anything changed
+        if config_changed:
+            try:
+                with open(config_file, 'w') as f:
+                    json.dump({"username": args.username, "workername": args.workername}, f, indent=4)
+                print(f"[*] Configuration saved to {config_file}")
+            except:
+                print("[!] Failed to save configuration file.")
+    # --- [END] CONFIGURATION LOGIC ---
+
+    check_ffmpeg()
+    
+    manager_url = (args.manager or DEFAULT_MANAGER_URL).rstrip('/')
+    username = args.username or DEFAULT_USERNAME
+    base_workername = args.workername or DEFAULT_WORKERNAME
+    
+    global WORKER_SECRET
+    if args.secret: WORKER_SECRET = args.secret
+
+    if WORKER_SECRET == "DefaultInsecureSecret":
+        print("[*] INFO: Using default WORKER_SECRET. Compatible with public manager defaults.")
+    
+    if not verify_connection(manager_url): sys.exit(1)
+    if check_version(manager_url): apply_update(manager_url)
+    
+    quota_tracker = None
+    if args.daily_quota > 0:
+        print(f"[*] Daily Quota Active: {args.daily_quota} GB")
+        quota_tracker = QuotaTracker(args.daily_quota, base_workername)
+        if quota_tracker.check_cap():
+            print(f"[!] Quota already exceeded for today. Waiting until tomorrow.")
+
+    num_jobs = args.jobs if args.jobs > 0 else 1
+    if num_jobs > 32: num_jobs = 32
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    threads = []
+    worker_ids = []
+    single_mode = (num_jobs == 1)
+    
+    if args.series_id:
+        print(f"[*] SERIES ID ACTIVE: Processing Series #{args.series_id}")
+    
+    for i in range(num_jobs):
+        worker_id = f"{username}-{base_workername}-{i+1}"
+        worker_ids.append(worker_id)
+        temp_dir = f"./temp_encode_{base_workername}_{i+1}"
+        
+        t = threading.Thread(target=worker_task, args=(worker_id, manager_url, temp_dir, quota_tracker, single_mode, args.series_id))
+        t.daemon = True
+        t.start()
+        threads.append(t)
+
+    if not single_mode:
+        monitor_t = threading.Thread(target=monitor_status_loop, args=(worker_ids,))
+        monitor_t.daemon = True
+        monitor_t.start()
+        
+    global PAUSE_REQUESTED
+    while True:
+        if not PAUSE_REQUESTED:
+            all_dead = True
+            for t in threads:
+                if t.is_alive(): all_dead = False; break
+            if all_dead: break
+            if SHUTDOWN_EVENT.is_set() and not PAUSE_REQUESTED: break 
+            time.sleep(0.5)
+            continue
+        
+        toggle_processes(suspend=True)
+        print("\n" + "="*40)
+        print(" [!] WORKER PAUSED")
+        print("="*40)
+        print(" [C]ontinue  - Resume encoding")
+        print(" [F]inish    - Finish active, then stop")
+        print(" [S]top      - Abort immediately")
+        
+        while PAUSE_REQUESTED:
+            try:
+                choice = input("Select [c/f/s]: ").strip().lower()
+                if choice == 'c':
+                    print("[*] Resuming...")
+                    PAUSE_REQUESTED = False
+                    toggle_processes(suspend=False)
+                elif choice == 'f':
+                    print("[*] Draining jobs...")
+                    PAUSE_REQUESTED = False
+                    toggle_processes(suspend=False)
+                    SHUTDOWN_EVENT.set()
+                elif choice == 's':
+                    print("[*] Aborting...")
+                    toggle_processes(suspend=False)
+                    kill_processes()
+                    SHUTDOWN_EVENT.set()
+                    PAUSE_REQUESTED = False
+                    sys.exit(0)
+            except (EOFError, KeyboardInterrupt):
+                sys.stdout.write("\n")
+                time.sleep(0.5)
+                continue
+            except Exception: time.sleep(0.5)
+            
+    if UPDATE_AVAILABLE: apply_update(manager_url)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--manager", default=DEFAULT_MANAGER_URL)
+    parser.add_argument("--username", default=DEFAULT_USERNAME)
+    parser.add_argument("--workername", default=DEFAULT_WORKERNAME)
+    parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("--series-id", default=None, help="Process only specific Series ID")
+    parser.add_argument("--secret", default=None, help="Manually set worker secret token")
+    parser.add_argument("--daily-quota", type=float, default=0, help="Daily download limit in GB (0 = unlimited)")
+    args = parser.parse_args()
+    run_worker(args)
