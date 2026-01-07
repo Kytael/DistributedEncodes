@@ -1,3 +1,10 @@
+<#
+.SYNOPSIS
+    Fractum Worker Launcher (Final Release)
+    - Fixes "Empty Config" bug by using .NET file writing.
+    - Keeps window open for logs.
+#>
+
 $ErrorActionPreference = "Stop"
 $DebugLog = "launcher_debug.txt"
 
@@ -15,15 +22,18 @@ $Config     = $null
 
 function Show-Error($msg) {
     Write-Error $msg
-    [System.Windows.Forms.MessageBox]::Show($msg, "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    [System.Windows.Forms.MessageBox]::Show($msg, "Fractum Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
 }
 
 # --- 1. Load or Create Config ---
 if (Test-Path $ConfigFile) {
     try {
-        $Config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+        $rawJson = Get-Content $ConfigFile -Raw
+        if ([string]::IsNullOrWhiteSpace($rawJson)) { throw "Empty File" }
+        $Config = $rawJson | ConvertFrom-Json
         Write-Host "Loaded existing config."
     } catch {
+        Write-Warning "Config corrupted or empty. Resetting."
         Remove-Item $ConfigFile -ErrorAction SilentlyContinue
     }
 }
@@ -31,17 +41,26 @@ if (Test-Path $ConfigFile) {
 if (-not $Config) {
     $defUser = "Anonymous"
     $uPrompt = "Please enter the USERNAME of the person running the program.`n(e.g. 'FractumSeraph')`n`n[Click Cancel to Quit]"
-    $uInput  = [Microsoft.VisualBasic.Interaction]::InputBox($uPrompt, "Setup (1/2)", $defUser)
+    $uInput  = [Microsoft.VisualBasic.Interaction]::InputBox($uPrompt, "Fractum Setup (1/2)", $defUser)
     if ($uInput -eq "") { Stop-Transcript; exit } 
 
     $defWorker = "Node-" + (Get-Random -Minimum 1000 -Maximum 9999)
     $wPrompt   = "Please enter a name for THIS COMPUTER.`n(e.g. 'LivingRoom-PC')`n`n[Click Cancel to Quit]"
-    $wInput    = [Microsoft.VisualBasic.Interaction]::InputBox($wPrompt, "Setup (2/2)", $defWorker)
+    $wInput    = [Microsoft.VisualBasic.Interaction]::InputBox($wPrompt, "Fractum Setup (2/2)", $defWorker)
     if ($wInput -eq "") { Stop-Transcript; exit }
 
     $Config = @{ username = $uInput; workername = $wInput }
-    $Config | ConvertTo-Json | Out-File $ConfigFile -Encoding UTF8
-    Write-Host "Config saved to $ConfigFile"
+    
+    # FIX: Use .NET File writing to prevent empty files / race conditions
+    try {
+        $jsonContent = $Config | ConvertTo-Json -Depth 2
+        $fullPath = Join-Path (Get-Location) $ConfigFile
+        [System.IO.File]::WriteAllText($fullPath, $jsonContent)
+        Write-Host "Config saved to $fullPath"
+    } catch {
+        Show-Error "Failed to save configuration file."
+        Stop-Transcript; exit
+    }
 }
 
 # --- 2. Check Python ---
