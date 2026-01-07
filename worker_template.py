@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.9.5" # [BUMPED] Auto-fix corrupted config files
+WORKER_VERSION = "1.9.6" # [BUMPED] Fixed Windows 'charmap' encoding crash
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
@@ -145,9 +145,15 @@ def get_term_width():
 
 def safe_print(message):
     with CONSOLE_LOCK:
-        sys.stdout.write('\033[2K\r')
-        print(message)
-        sys.stdout.flush()
+        try:
+            sys.stdout.write('\033[2K\r')
+            print(message)
+            sys.stdout.flush()
+        except UnicodeEncodeError:
+            # Fallback for systems that hate special chars
+            try:
+                print(message.encode('ascii', 'ignore').decode('ascii'))
+            except: pass
 
 def log(worker_id, message, level="INFO"):
     timestamp = datetime.now().strftime("%H:%M:%S")
@@ -157,8 +163,10 @@ def signal_handler(sig, frame):
     global PAUSE_REQUESTED
     if not PAUSE_REQUESTED:
         PAUSE_REQUESTED = True
-        sys.stdout.write('\n\n[!] PAUSE REQUESTED (Stopping gracefully...)\n')
-        sys.stdout.flush()
+        try:
+            sys.stdout.write('\n\n[!] PAUSE REQUESTED (Stopping gracefully...)\n')
+            sys.stdout.flush()
+        except: pass
 
 def toggle_processes(suspend=True):
     with PROC_LOCK:
@@ -216,13 +224,36 @@ def print_progress(worker_id, current, total, prefix='', suffix=''):
     bar_length = width - overhead - 5
     if bar_length < 10: bar_length = 10
     filled_length = int(bar_length * current // total)
-    bar = '█' * filled_length + '-' * (bar_length - filled_length)
-    line = f'[{datetime.now().strftime("%H:%M:%S")}] [{worker_id}] {prefix} |{bar}| {percent:.1f}% {suffix}'
-    with CONSOLE_LOCK:
-        if len(line) > width: line = line[:width-1]
-        sys.stdout.write('\033[2K\r' + line)
-        sys.stdout.flush()
-    if current >= total: sys.stdout.write('\n')
+    
+    # [FIX] Safer bar characters for Windows legacy consoles
+    block_char = '█'
+    fill_char = '-'
+    
+    try:
+        bar = block_char * filled_length + fill_char * (bar_length - filled_length)
+        line = f'[{datetime.now().strftime("%H:%M:%S")}] [{worker_id}] {prefix} |{bar}| {percent:.1f}% {suffix}'
+        
+        with CONSOLE_LOCK:
+            if len(line) > width: line = line[:width-1]
+            sys.stdout.write('\033[2K\r' + line)
+            sys.stdout.flush()
+            
+    except UnicodeEncodeError:
+        # Fallback to safe ASCII if the fancy bar fails
+        block_char = '='
+        fill_char = '-'
+        try:
+            bar = block_char * filled_length + fill_char * (bar_length - filled_length)
+            line = f'[{datetime.now().strftime("%H:%M:%S")}] [{worker_id}] {prefix} |{bar}| {percent:.1f}% {suffix}'
+            with CONSOLE_LOCK:
+                if len(line) > width: line = line[:width-1]
+                sys.stdout.write('\r' + line)
+                sys.stdout.flush()
+        except: pass # If even ASCII fails, just give up on the bar to save the job
+
+    if current >= total: 
+        try: sys.stdout.write('\n')
+        except: pass
 
 def monitor_status_loop(worker_ids):
     while not SHUTDOWN_EVENT.is_set():
@@ -240,8 +271,10 @@ def monitor_status_loop(worker_ids):
             width = get_term_width()
             if len(line) > width - 1: line = line[:width-4] + "..."
             with CONSOLE_LOCK:
-                sys.stdout.write('\033[2K\r' + line)
-                sys.stdout.flush()
+                try:
+                    sys.stdout.write('\033[2K\r' + line)
+                    sys.stdout.flush()
+                except: pass
         time.sleep(0.5)
 
 def get_seconds(t):
@@ -282,8 +315,10 @@ def download_ffmpeg_windows():
                         downloaded += len(chunk)
                         if total_size > 0:
                             pct = int((downloaded / total_size) * 100)
-                            sys.stdout.write(f"\r    Downloading... {pct}%")
-                            sys.stdout.flush()
+                            try:
+                                sys.stdout.write(f"\r    Downloading... {pct}%")
+                                sys.stdout.flush()
+                            except: pass
             print("\n[*] Extracting FFmpeg...")
             
             with zipfile.ZipFile(temp_zip) as z:
@@ -338,8 +373,10 @@ def download_ffmpeg_linux():
                  downloaded += len(chunk)
                  if total_size > 0:
                      pct = int((downloaded / total_size) * 100)
-                     sys.stdout.write(f"\r    Downloading... {pct}%")
-                     sys.stdout.flush()
+                     try:
+                         sys.stdout.write(f"\r    Downloading... {pct}%")
+                         sys.stdout.flush()
+                     except: pass
         
         print("\n[*] Extracting FFmpeg...")
         ext_dir = f"temp_ffmpeg_ext_{int(time.time())}"
