@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.9.0" # [BUMPED] Support for Remote HTTP Sources
+WORKER_VERSION = "1.9.1" # [BUMPED] Added Interactive Setup & Config Persistence
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
@@ -616,6 +616,61 @@ def run_worker(args):
     print("==================================================")
     print(" FRACTUM DISTRIBUTED WORKER")
     print("==================================================")
+
+    # --- [START] CONFIGURATION LOGIC ---
+    config_file = "worker_config.json"
+    saved_config = {}
+    
+    # 1. Try to load existing config
+    if os.path.exists(config_file):
+        try:
+            with open(config_file, 'r') as f:
+                saved_config = json.load(f)
+                # Apply saved config IF the user didn't override via CLI flags
+                if args.username == DEFAULT_USERNAME and 'username' in saved_config:
+                    args.username = saved_config['username']
+                if args.workername == DEFAULT_WORKERNAME and 'workername' in saved_config:
+                    args.workername = saved_config['workername']
+        except Exception as e:
+            print(f"[!] Warning: Could not read config file: {e}")
+
+    # 2. Interactive Setup (Only if using defaults and running in a terminal)
+    # We check sys.stdin.isatty() so we don't hang Docker/Headless servers
+    if sys.stdin.isatty():
+        config_changed = False
+        
+        # Ask for Username if still default
+        if args.username == DEFAULT_USERNAME:
+            print("\n[*] First Time Setup detected.")
+            print("    Please enter the USERNAME of the person running the program.")
+            print("    (e.g., 'FractumSeraph', 'John Smith')")
+            u_input = input(f"    Enter Username (Default: {DEFAULT_USERNAME}): ").strip()
+            if u_input:
+                args.username = u_input
+                config_changed = True
+        
+        # Ask for Workername if still default
+        if args.workername == DEFAULT_WORKERNAME:
+            w_default = f"Node-{int(time.time())}"
+            print("\n    Please enter a name for THIS COMPUTER.")
+            print("    (e.g., 'Fractums Laptop', 'Johns Gaming PC')")
+            w_input = input(f"    Enter Worker Name (Default: {w_default}): ").strip()
+            if w_input:
+                args.workername = w_input
+            else:
+                args.workername = w_default
+            config_changed = True
+
+        # 3. Save Config if anything changed
+        if config_changed:
+            try:
+                with open(config_file, 'w') as f:
+                    json.dump({"username": args.username, "workername": args.workername}, f, indent=4)
+                print(f"[*] Configuration saved to {config_file}")
+            except:
+                print("[!] Failed to save configuration file.")
+    # --- [END] CONFIGURATION LOGIC ---
+
     check_ffmpeg()
     
     manager_url = (args.manager or DEFAULT_MANAGER_URL).rstrip('/')
