@@ -306,8 +306,8 @@ def download_ffmpeg_windows():
     print("[*] FFmpeg not found. Attempting download (FULL Version ~128MB)...")
     
     urls = [
-        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.zip",
-        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z"
     ]
     
     temp_zip = "ffmpeg_temp.zip"
