@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.9.1" # [BUMPED] Added Interactive Setup & Config Persistence
+WORKER_VERSION = "1.9.2" # [BUMPED] Added Download Progress Bar for FFmpeg
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
@@ -256,13 +256,27 @@ def get_seconds(t):
 # ==============================================================================
 
 def download_ffmpeg_windows():
-    print("[*] FFmpeg not found. Downloading (approx 30-40MB)...")
+    print("[*] FFmpeg not found. Downloading (approx 60MB)...")
+    url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    temp_zip = "ffmpeg_temp.zip"
+    
     try:
-        url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-        r = requests.get(url, stream=True)
-        r.raise_for_status()
+        with requests.get(url, stream=True, timeout=15) as r:
+            r.raise_for_status()
+            total_size = int(r.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(temp_zip, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        pct = int((downloaded / total_size) * 100)
+                        sys.stdout.write(f"\r    Downloading... {pct}%")
+                        sys.stdout.flush()
+        print("\n[*] Extracting FFmpeg...")
         
-        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        with zipfile.ZipFile(temp_zip) as z:
             ffmpeg_path = None
             ffprobe_path = None
             for file in z.namelist():
@@ -270,15 +284,17 @@ def download_ffmpeg_windows():
                 if file.endswith("bin/ffprobe.exe"): ffprobe_path = file
             
             if not ffmpeg_path or not ffprobe_path:
-                raise Exception("Could not find ffmpeg.exe in downloaded zip")
+                raise Exception("Could not find binaries in zip")
             
-            print("[*] Extracting FFmpeg...")
             with open("ffmpeg.exe", "wb") as f: f.write(z.read(ffmpeg_path))
             with open("ffprobe.exe", "wb") as f: f.write(z.read(ffprobe_path))
+            
+        os.remove(temp_zip)
         print("[*] FFmpeg installed locally!")
         return True
     except Exception as e:
-        print(f"[!] Auto-download failed: {e}")
+        print(f"\n[!] Download failed: {e}")
+        if os.path.exists(temp_zip): os.remove(temp_zip)
         return False
 
 def download_ffmpeg_linux():
@@ -297,16 +313,24 @@ def download_ffmpeg_linux():
 
     try:
         # Follow redirects (GitHub releases redirect)
-        r = requests.get(url, stream=True, allow_redirects=True)
+        r = requests.get(url, stream=True, allow_redirects=True, timeout=15)
         r.raise_for_status()
         
         # Save to temporary file
         tar_name = f"ffmpeg_static_{int(time.time())}.tar.xz"
+        total_size = int(r.headers.get('content-length', 0))
+        downloaded = 0
+        
         with open(tar_name, 'wb') as f:
              for chunk in r.iter_content(chunk_size=8192):
                  f.write(chunk)
+                 downloaded += len(chunk)
+                 if total_size > 0:
+                     pct = int((downloaded / total_size) * 100)
+                     sys.stdout.write(f"\r    Downloading... {pct}%")
+                     sys.stdout.flush()
         
-        print("[*] Extracting FFmpeg...")
+        print("\n[*] Extracting FFmpeg...")
         # Create temp dir for extraction
         ext_dir = f"temp_ffmpeg_ext_{int(time.time())}"
         os.makedirs(ext_dir, exist_ok=True)
@@ -339,7 +363,7 @@ def download_ffmpeg_linux():
             return False
 
     except Exception as e:
-        print(f"[!] Linux Download failed: {e}")
+        print(f"\n[!] Linux Download failed: {e}")
         return False
 
 def has_svtav1(cmd):
