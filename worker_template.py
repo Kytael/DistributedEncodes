@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.9.6" # [BUMPED] Fixed Windows 'charmap' encoding crash
+WORKER_VERSION = "1.9.7" # [BUMPED] Increased Timeout & Fixed Console "Black Screen"
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
@@ -146,13 +146,18 @@ def get_term_width():
 def safe_print(message):
     with CONSOLE_LOCK:
         try:
-            sys.stdout.write('\033[2K\r')
-            print(message)
+            width = get_term_width()
+            # Truncate to avoid wrapping
+            if len(message) > width - 1:
+                message = message[:width-1]
+            
+            # Use spaces to clear the line instead of ANSI \033[2K which breaks some cmd.exe
+            padded = message.ljust(width - 1)
+            sys.stdout.write(f'\r{padded}\n')
             sys.stdout.flush()
-        except UnicodeEncodeError:
-            # Fallback for systems that hate special chars
-            try:
-                print(message.encode('ascii', 'ignore').decode('ascii'))
+        except:
+            # Absolute fallback
+            try: print(message)
             except: pass
 
 def log(worker_id, message, level="INFO"):
@@ -225,7 +230,8 @@ def print_progress(worker_id, current, total, prefix='', suffix=''):
     if bar_length < 10: bar_length = 10
     filled_length = int(bar_length * current // total)
     
-    # [FIX] Safer bar characters for Windows legacy consoles
+    # Use safer ASCII chars for stability if needed, but defaults are usually okay unless encoding is totally broken.
+    # To fix "Black Screen" / wrapping newlines, we strictly control line length.
     block_char = '█'
     fill_char = '-'
     
@@ -234,22 +240,28 @@ def print_progress(worker_id, current, total, prefix='', suffix=''):
         line = f'[{datetime.now().strftime("%H:%M:%S")}] [{worker_id}] {prefix} |{bar}| {percent:.1f}% {suffix}'
         
         with CONSOLE_LOCK:
-            if len(line) > width: line = line[:width-1]
-            sys.stdout.write('\033[2K\r' + line)
+            # CRITICAL FIX: Ensure we never exceed terminal width to prevent auto-newline
+            if len(line) > width - 1:
+                line = line[:width - 1]
+            
+            # Use spaces to overwrite previous line content
+            padded = line.ljust(width - 1)
+            sys.stdout.write(f'\r{padded}')
             sys.stdout.flush()
             
     except UnicodeEncodeError:
-        # Fallback to safe ASCII if the fancy bar fails
+        # Fallback to pure ASCII
         block_char = '='
         fill_char = '-'
         try:
             bar = block_char * filled_length + fill_char * (bar_length - filled_length)
             line = f'[{datetime.now().strftime("%H:%M:%S")}] [{worker_id}] {prefix} |{bar}| {percent:.1f}% {suffix}'
             with CONSOLE_LOCK:
-                if len(line) > width: line = line[:width-1]
-                sys.stdout.write('\r' + line)
+                if len(line) > width - 1: line = line[:width - 1]
+                padded = line.ljust(width - 1)
+                sys.stdout.write(f'\r{padded}')
                 sys.stdout.flush()
-        except: pass # If even ASCII fails, just give up on the bar to save the job
+        except: pass 
 
     if current >= total: 
         try: sys.stdout.write('\n')
@@ -272,7 +284,9 @@ def monitor_status_loop(worker_ids):
             if len(line) > width - 1: line = line[:width-4] + "..."
             with CONSOLE_LOCK:
                 try:
-                    sys.stdout.write('\033[2K\r' + line)
+                    # Use spaces padding instead of ANSI
+                    padded = line.ljust(width - 1)
+                    sys.stdout.write(f'\r{padded}')
                     sys.stdout.flush()
                 except: pass
         time.sleep(0.5)
@@ -291,8 +305,6 @@ def get_seconds(t):
 def download_ffmpeg_windows():
     print("[*] FFmpeg not found. Attempting download (FULL Version ~128MB)...")
     
-    # 1. Primary: Gyan.dev (FULL BUILD) - Required for SVT-AV1
-    # 2. Backup: BtbN (GitHub) - Also contains SVT-AV1
     urls = [
         "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.zip",
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
@@ -303,7 +315,7 @@ def download_ffmpeg_windows():
     for url in urls:
         print(f"[*] Trying mirror: {url}")
         try:
-            # Increased timeout for larger files
+            # [FIX] Timeout increased to 180s (3 mins) as requested
             with requests.get(url, stream=True, timeout=180) as r:
                 r.raise_for_status()
                 total_size = int(r.headers.get('content-length', 0))
@@ -316,7 +328,9 @@ def download_ffmpeg_windows():
                         if total_size > 0:
                             pct = int((downloaded / total_size) * 100)
                             try:
-                                sys.stdout.write(f"\r    Downloading... {pct}%")
+                                # [FIX] Simple non-wrapping progress
+                                msg = f"    Downloading... {pct}%"
+                                sys.stdout.write(f"\r{msg}")
                                 sys.stdout.flush()
                             except: pass
             print("\n[*] Extracting FFmpeg...")
@@ -329,7 +343,6 @@ def download_ffmpeg_windows():
                     if file.endswith("bin/ffprobe.exe"): ffprobe_path = file
                 
                 if not ffmpeg_path or not ffprobe_path:
-                    # Could not find in this zip, try next
                     print("\n[!] Binaries not found in zip.")
                     continue
                 
@@ -360,7 +373,8 @@ def download_ffmpeg_linux():
         return False
 
     try:
-        r = requests.get(url, stream=True, allow_redirects=True, timeout=30)
+        # [FIX] Timeout increased to 180s for Linux too
+        r = requests.get(url, stream=True, allow_redirects=True, timeout=180)
         r.raise_for_status()
         
         tar_name = f"ffmpeg_static_{int(time.time())}.tar.xz"
