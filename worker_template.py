@@ -271,7 +271,7 @@ def download_ffmpeg_windows():
         print(f"[*] Trying mirror: {url}")
         try:
             # Increased timeout for larger files
-            with requests.get(url, stream=True, timeout=30) as r:
+            with requests.get(url, stream=True, timeout=180) as r:
                 r.raise_for_status()
                 total_size = int(r.headers.get('content-length', 0))
                 downloaded = 0
