@@ -1,136 +1,96 @@
-<#
-.SYNOPSIS
-    Fractum Worker Launcher & Installer (User Friendly Version)
-    Installs Python, asks for User/Worker details via Popup, and runs the worker.
-#>
-
 $ErrorActionPreference = "Stop"
 
-# Configuration
-$ManagerUrl = "https://encode.fractumseraph.net/"
-$WorkerUrl = "$($ManagerUrl)dl/worker"
-$ConfigFile = "worker_config.json"
-
-# Load Visual Basic (Required for Input Boxes)
+# Load required UI assemblies for InputBoxes
 Add-Type -AssemblyName Microsoft.VisualBasic
+Add-Type -AssemblyName System.Windows.Forms
 
-Write-Host "=========================================" -ForegroundColor Cyan
-Write-Host "   Fractum Distributed Encoder Setup" -ForegroundColor Cyan
-Write-Host "=========================================" -ForegroundColor Cyan
+# --- Configuration ---
+$ManagerUrl = "https://encode.fractumseraph.net/"
+$WorkerUrl  = "$($ManagerUrl)dl/worker"
+$ConfigFile = "worker_config.json"
+$Config     = $null
 
-# --------------------------------------------------------------------------
-# 1. SETUP & CONFIGURATION (The User-Friendly Part)
-# --------------------------------------------------------------------------
+# --- Helper Function for Errors ---
+function Show-Error($msg) {
+    [System.Windows.Forms.MessageBox]::Show($msg, "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+}
 
-# Check if we already have saved settings
+# --- 1. Load or Create Config ---
+# We try to load the config silently.
 if (Test-Path $ConfigFile) {
-    Write-Host "[*] Loading saved configuration..." -ForegroundColor Gray
     try {
         $Config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
     } catch {
-        Write-Warning "Config file corrupted. Resetting."
         Remove-Item $ConfigFile -ErrorAction SilentlyContinue
     }
 }
 
-# If no config exists (First Run), ask the user via Popup Windows
+# If config is missing, we ask the user ONE time.
 if (-not $Config) {
-    Write-Host "[*] First time setup: Asking for user details..." -ForegroundColor Yellow
-
     # Prompt 1: Username
-    # Explanation: The person running the program.
-    $MsgUser = "Please enter the USERNAME of the person running the program." + `
-               "`n`nExamples: 'FractumSeraph', 'John Smith', 'JaneDoe'"
+    $defUser = "Anonymous"
+    $uPrompt = "Please enter the USERNAME of the person running the program.`n(e.g. 'FractumSeraph', 'John Smith')`n`n[Click Cancel to Quit]"
+    $uInput  = [Microsoft.VisualBasic.Interaction]::InputBox($uPrompt, "Fractum Encodes Setup (1/2)", $defUser)
     
-    $InputUser = [Microsoft.VisualBasic.Interaction]::InputBox(
-        $MsgUser, 
-        "Fractum Setup - Step 1 of 2", 
-        "Anonymous"
-    )
-    if ([string]::IsNullOrWhiteSpace($InputUser)) { $InputUser = "Anonymous" }
+    # FIX: Check if user hit Cancel (Empty String)
+    if ($uInput -eq "") { exit } 
 
     # Prompt 2: Worker Name
-    # Explanation: The name of the specific computer.
-    $MsgWorker = "Please enter a name for THIS COMPUTER." + `
-                 "`n`nExamples: 'Fractums Laptop', 'Johns Gaming PC', 'LivingRoom-PC'"
-    
-    $DefaultWorker = "Node-" + (Get-Random -Minimum 1000 -Maximum 9999)
-    $InputWorker = [Microsoft.VisualBasic.Interaction]::InputBox(
-        $MsgWorker, 
-        "Fractum Setup - Step 2 of 2", 
-        $DefaultWorker
-    )
-    if ([string]::IsNullOrWhiteSpace($InputWorker)) { $InputWorker = $DefaultWorker }
+    $defWorker = "Node-" + (Get-Random -Minimum 1000 -Maximum 9999)
+    $wPrompt   = "Please enter a name for THIS COMPUTER.`n(e.g. 'LivingRoom-PC')`n`n[Click Cancel to Quit]"
+    $wInput    = [Microsoft.VisualBasic.Interaction]::InputBox($wPrompt, "Fractum Encodes Setup (2/2)", $defWorker)
 
-    # Save to file so the worker remembers this next time
-    $Config = @{
-        username   = $InputUser
-        workername = $InputWorker
-    }
+    # FIX: Check if user hit Cancel
+    if ($wInput -eq "") { exit }
+
+    # Save to file
+    $Config = @{ username = $uInput; workername = $wInput }
     $Config | ConvertTo-Json | Out-File $ConfigFile -Encoding UTF8
-    
-    Write-Host "    Settings saved to $ConfigFile" -ForegroundColor Green
 }
 
-# --------------------------------------------------------------------------
-# 2. CHECK PYTHON INSTALLATION
-# --------------------------------------------------------------------------
-Write-Host "[*] Checking for Python..."
+# --- 2. Check Python (Silent) ---
+$pythonExists = $false
 try {
-    $pyVersion = python --version 2>&1
-    if ($pyVersion -match "Python 3") {
-        Write-Host "    Found $pyVersion" -ForegroundColor Green
-    } else { throw "Missing" }
-} catch {
-    Write-Host "    Python not found. Downloading installer..." -ForegroundColor Yellow
-    
-    $installerPath = "$env:TEMP\python_installer.exe"
-    $pyUrl = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe"
+    # We redirect output to $null so it doesn't cause a popup
+    $ver = python --version 2>&1
+    if ($ver -match "Python 3") { $pythonExists = $true }
+} catch {}
+
+if (-not $pythonExists) {
+    # Only show this popup if we actually need to install Python
+    [System.Windows.Forms.MessageBox]::Show("Python is missing.`n`nClick OK to install it automatically.`n(This may take 1-2 minutes. Please wait.)", "Fractum Setup", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
     
     try {
-        Invoke-WebRequest -Uri $pyUrl -OutFile $installerPath -UseBasicParsing
-        Write-Host "    Installing Python (This may take a minute)..." -ForegroundColor Yellow
-        # Silent install
-        Start-Process -FilePath $installerPath -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" -Wait
-        # Refresh environment variables
+        $installer = "$env:TEMP\python_installer.exe"
+        Invoke-WebRequest "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe" -OutFile $installer -UseBasicParsing
+        # Install silently
+        Start-Process -FilePath $installer -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" -Wait
+        # Refresh Path
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-        Write-Host "    Python installed successfully!" -ForegroundColor Green
     } catch {
-        [Microsoft.VisualBasic.Interaction]::MsgBox("Failed to install Python. Please Run as Administrator.", "Critical Error", 0)
+        Show-Error "Failed to install Python. Please run this installer as Administrator."
         exit
     }
 }
 
-# --------------------------------------------------------------------------
-# 3. INSTALL DEPENDENCIES & DOWNLOAD WORKER
-# --------------------------------------------------------------------------
-Write-Host "[*] Checking dependencies..."
+# --- 3. Check Dependencies (Silent) ---
 try {
     pip install requests --disable-pip-version-check | Out-Null
 } catch {
-    python -m pip install requests
+    python -m pip install requests | Out-Null
 }
 
+# --- 4. Download Worker (Silent) ---
 if (-not (Test-Path "worker.py")) {
-    Write-Host "[*] Downloading worker script..."
     try {
-        Invoke-WebRequest -Uri $WorkerUrl -OutFile "worker.py" -UseBasicParsing
+        Invoke-WebRequest $WorkerUrl -OutFile "worker.py" -UseBasicParsing
     } catch {
-        Write-Error "Could not download worker.py from $WorkerUrl"
+        Show-Error "Could not download worker script from server.`nCheck your internet connection."
         exit
     }
 }
 
-# --------------------------------------------------------------------------
-# 4. LAUNCH THE WORKER
-# --------------------------------------------------------------------------
-Write-Host "`n[*] Launching Worker..." -ForegroundColor Cyan
-Write-Host "    User:   $($Config.username)" -ForegroundColor Gray
-Write-Host "    Worker: $($Config.workername)" -ForegroundColor Gray
-Write-Host "`n[!] Press Ctrl+C to stop the worker." -ForegroundColor Yellow
-
-# Pass the configured variables to the python script
-python worker.py --manager $ManagerUrl --username "$($Config.username)" --workername "$($Config.workername)" --jobs 1
-
-Write-Host "`nWorker exited."
-Start-Sleep -Seconds 5
+# --- 5. Launch the Worker ---
+# This opens the black console window for the worker itself so the user can see progress.
+# The Launcher (.exe) will close immediately after this.
+Start-Process python -ArgumentList "worker.py --manager $ManagerUrl --username `"$($Config.username)`" --workername `"$($Config.workername)`" --jobs 1"
