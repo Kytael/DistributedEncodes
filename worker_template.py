@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.9.2" # [BUMPED] Added Download Progress Bar for FFmpeg
+WORKER_VERSION = "1.9.4" # [BUMPED] Switched to FFmpeg FULL build for SVT-AV1 support
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
@@ -256,67 +256,78 @@ def get_seconds(t):
 # ==============================================================================
 
 def download_ffmpeg_windows():
-    print("[*] FFmpeg not found. Downloading (approx 60MB)...")
-    url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    print("[*] FFmpeg not found. Attempting download (FULL Version ~128MB)...")
+    
+    # 1. Primary: Gyan.dev (FULL BUILD) - Required for SVT-AV1
+    # 2. Backup: BtbN (GitHub) - Also contains SVT-AV1
+    urls = [
+        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.zip",
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+    ]
+    
     temp_zip = "ffmpeg_temp.zip"
     
-    try:
-        with requests.get(url, stream=True, timeout=15) as r:
-            r.raise_for_status()
-            total_size = int(r.headers.get('content-length', 0))
-            downloaded = 0
+    for url in urls:
+        print(f"[*] Trying mirror: {url}")
+        try:
+            # Increased timeout for larger files
+            with requests.get(url, stream=True, timeout=30) as r:
+                r.raise_for_status()
+                total_size = int(r.headers.get('content-length', 0))
+                downloaded = 0
+                
+                with open(temp_zip, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            pct = int((downloaded / total_size) * 100)
+                            sys.stdout.write(f"\r    Downloading... {pct}%")
+                            sys.stdout.flush()
+            print("\n[*] Extracting FFmpeg...")
             
-            with open(temp_zip, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size > 0:
-                        pct = int((downloaded / total_size) * 100)
-                        sys.stdout.write(f"\r    Downloading... {pct}%")
-                        sys.stdout.flush()
-        print("\n[*] Extracting FFmpeg...")
-        
-        with zipfile.ZipFile(temp_zip) as z:
-            ffmpeg_path = None
-            ffprobe_path = None
-            for file in z.namelist():
-                if file.endswith("bin/ffmpeg.exe"): ffmpeg_path = file
-                if file.endswith("bin/ffprobe.exe"): ffprobe_path = file
+            with zipfile.ZipFile(temp_zip) as z:
+                ffmpeg_path = None
+                ffprobe_path = None
+                for file in z.namelist():
+                    if file.endswith("bin/ffmpeg.exe"): ffmpeg_path = file
+                    if file.endswith("bin/ffprobe.exe"): ffprobe_path = file
+                
+                if not ffmpeg_path or not ffprobe_path:
+                    # Could not find in this zip, try next
+                    print("\n[!] Binaries not found in zip.")
+                    continue
+                
+                with open("ffmpeg.exe", "wb") as f: f.write(z.read(ffmpeg_path))
+                with open("ffprobe.exe", "wb") as f: f.write(z.read(ffprobe_path))
+                
+            os.remove(temp_zip)
+            print("[*] FFmpeg installed locally!")
+            return True
             
-            if not ffmpeg_path or not ffprobe_path:
-                raise Exception("Could not find binaries in zip")
+        except Exception as e:
+            print(f"\n[!] Mirror failed: {e}")
+            if os.path.exists(temp_zip): os.remove(temp_zip)
+            continue
             
-            with open("ffmpeg.exe", "wb") as f: f.write(z.read(ffmpeg_path))
-            with open("ffprobe.exe", "wb") as f: f.write(z.read(ffprobe_path))
-            
-        os.remove(temp_zip)
-        print("[*] FFmpeg installed locally!")
-        return True
-    except Exception as e:
-        print(f"\n[!] Download failed: {e}")
-        if os.path.exists(temp_zip): os.remove(temp_zip)
-        return False
+    return False
 
 def download_ffmpeg_linux():
-    print("[*] Downloading static FFmpeg build (BtbN) (approx 40-80MB)...")
+    print("[*] Downloading static FFmpeg build (BtbN)...")
     arch = platform.machine().lower()
     
-    # Use BtbN builds which definitely have libsvtav1 support
     if arch in ['x86_64', 'amd64']:
         url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
     elif arch in ['aarch64', 'arm64']:
-        # Fallback to JVS for ARM as BtbN ARM builds are less consistent/available in the same structure
         url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz"
     else:
         print(f"[!] Unsupported architecture for auto-download: {arch}")
         return False
 
     try:
-        # Follow redirects (GitHub releases redirect)
-        r = requests.get(url, stream=True, allow_redirects=True, timeout=15)
+        r = requests.get(url, stream=True, allow_redirects=True, timeout=30)
         r.raise_for_status()
         
-        # Save to temporary file
         tar_name = f"ffmpeg_static_{int(time.time())}.tar.xz"
         total_size = int(r.headers.get('content-length', 0))
         downloaded = 0
@@ -331,15 +342,12 @@ def download_ffmpeg_linux():
                      sys.stdout.flush()
         
         print("\n[*] Extracting FFmpeg...")
-        # Create temp dir for extraction
         ext_dir = f"temp_ffmpeg_ext_{int(time.time())}"
         os.makedirs(ext_dir, exist_ok=True)
         
-        # Extract .tar.xz
         with tarfile.open(tar_name, "r:xz") as tar:
             tar.extractall(path=ext_dir)
             
-        # Recursive search for the binary (BtbN puts it in a subdirectory)
         found_ffmpeg = False
         for root, dirs, files in os.walk(ext_dir):
             for file in files:
@@ -349,7 +357,6 @@ def download_ffmpeg_linux():
                 elif file == "ffprobe":
                     shutil.move(os.path.join(root, file), "ffprobe")
 
-        # Cleanup
         if os.path.exists(tar_name): os.remove(tar_name)
         if os.path.exists(ext_dir): shutil.rmtree(ext_dir)
         
