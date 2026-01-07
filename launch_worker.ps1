@@ -1,15 +1,12 @@
 <#
 .SYNOPSIS
-    Fractum Worker Launcher (Final Release)
-    - Fixes "Empty Config" bug by using .NET file writing.
-    - Keeps window open for logs.
+    Fractum Worker Launcher (Production)
+    - Silent startup.
+    - No debug logs.
+    - Launches worker in its own window.
 #>
 
 $ErrorActionPreference = "Stop"
-$DebugLog = "launcher_debug.txt"
-
-# --- Start Logging ---
-Start-Transcript -Path $DebugLog -Force
 
 Add-Type -AssemblyName Microsoft.VisualBasic
 Add-Type -AssemblyName System.Windows.Forms
@@ -21,7 +18,6 @@ $ConfigFile = "worker_config.json"
 $Config     = $null
 
 function Show-Error($msg) {
-    Write-Error $msg
     [System.Windows.Forms.MessageBox]::Show($msg, "Fractum Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
 }
 
@@ -31,9 +27,7 @@ if (Test-Path $ConfigFile) {
         $rawJson = Get-Content $ConfigFile -Raw
         if ([string]::IsNullOrWhiteSpace($rawJson)) { throw "Empty File" }
         $Config = $rawJson | ConvertFrom-Json
-        Write-Host "Loaded existing config."
     } catch {
-        Write-Warning "Config corrupted or empty. Resetting."
         Remove-Item $ConfigFile -ErrorAction SilentlyContinue
     }
 }
@@ -42,24 +36,22 @@ if (-not $Config) {
     $defUser = "Anonymous"
     $uPrompt = "Please enter the USERNAME of the person running the program.`n(e.g. 'FractumSeraph')`n`n[Click Cancel to Quit]"
     $uInput  = [Microsoft.VisualBasic.Interaction]::InputBox($uPrompt, "Fractum Setup (1/2)", $defUser)
-    if ($uInput -eq "") { Stop-Transcript; exit } 
+    if ($uInput -eq "") { exit } 
 
     $defWorker = "Node-" + (Get-Random -Minimum 1000 -Maximum 9999)
     $wPrompt   = "Please enter a name for THIS COMPUTER.`n(e.g. 'LivingRoom-PC')`n`n[Click Cancel to Quit]"
     $wInput    = [Microsoft.VisualBasic.Interaction]::InputBox($wPrompt, "Fractum Setup (2/2)", $defWorker)
-    if ($wInput -eq "") { Stop-Transcript; exit }
+    if ($wInput -eq "") { exit }
 
     $Config = @{ username = $uInput; workername = $wInput }
     
-    # FIX: Use .NET File writing to prevent empty files / race conditions
     try {
         $jsonContent = $Config | ConvertTo-Json -Depth 2
         $fullPath = Join-Path (Get-Location) $ConfigFile
         [System.IO.File]::WriteAllText($fullPath, $jsonContent)
-        Write-Host "Config saved to $fullPath"
     } catch {
         Show-Error "Failed to save configuration file."
-        Stop-Transcript; exit
+        exit
     }
 }
 
@@ -79,7 +71,7 @@ if (-not $pythonExists) {
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
     } catch {
         Show-Error "Failed to install Python."
-        Stop-Transcript; exit
+        exit
     }
 }
 
@@ -88,20 +80,15 @@ try { pip install requests --disable-pip-version-check | Out-Null } catch { pyth
 
 # --- 4. Download Worker ---
 try {
-    Write-Host "Updating worker script..."
     Invoke-WebRequest $WorkerUrl -OutFile "worker.py" -UseBasicParsing
 } catch {
     if (-not (Test-Path "worker.py")) {
         Show-Error "Could not download worker script.`nCheck internet connection."
-        Stop-Transcript; exit
+        exit
     }
 }
 
 # --- 5. Launch Worker ---
+# This opens the worker in a standard console window and closes the launcher.
 $CurrentDir = Get-Location
-$LaunchCmd = "python worker.py --manager $ManagerUrl --jobs 1 2>&1 | Tee-Object -FilePath 'worker_log.txt'"
-
-Write-Host "Starting Worker..."
-Stop-Transcript
-
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "$LaunchCmd" -WorkingDirectory $CurrentDir
+Start-Process python -ArgumentList "worker.py --manager $ManagerUrl --jobs 1" -WorkingDirectory $CurrentDir
