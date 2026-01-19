@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.9.7" # [BUMPED] Increased Timeout & Fixed Console "Black Screen"
+WORKER_VERSION = "1.9.8"
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
@@ -230,8 +230,6 @@ def print_progress(worker_id, current, total, prefix='', suffix=''):
     if bar_length < 10: bar_length = 10
     filled_length = int(bar_length * current // total)
     
-    # Use safer ASCII chars for stability if needed, but defaults are usually okay unless encoding is totally broken.
-    # To fix "Black Screen" / wrapping newlines, we strictly control line length.
     block_char = '█'
     fill_char = '-'
     
@@ -240,17 +238,14 @@ def print_progress(worker_id, current, total, prefix='', suffix=''):
         line = f'[{datetime.now().strftime("%H:%M:%S")}] [{worker_id}] {prefix} |{bar}| {percent:.1f}% {suffix}'
         
         with CONSOLE_LOCK:
-            # CRITICAL FIX: Ensure we never exceed terminal width to prevent auto-newline
             if len(line) > width - 1:
                 line = line[:width - 1]
             
-            # Use spaces to overwrite previous line content
             padded = line.ljust(width - 1)
             sys.stdout.write(f'\r{padded}')
             sys.stdout.flush()
             
     except UnicodeEncodeError:
-        # Fallback to pure ASCII
         block_char = '='
         fill_char = '-'
         try:
@@ -284,7 +279,6 @@ def monitor_status_loop(worker_ids):
             if len(line) > width - 1: line = line[:width-4] + "..."
             with CONSOLE_LOCK:
                 try:
-                    # Use spaces padding instead of ANSI
                     padded = line.ljust(width - 1)
                     sys.stdout.write(f'\r{padded}')
                     sys.stdout.flush()
@@ -315,7 +309,6 @@ def download_ffmpeg_windows():
     for url in urls:
         print(f"[*] Trying mirror: {url}")
         try:
-            # [FIX] Timeout increased to 180s (3 mins) as requested
             with requests.get(url, stream=True, timeout=180) as r:
                 r.raise_for_status()
                 total_size = int(r.headers.get('content-length', 0))
@@ -328,7 +321,6 @@ def download_ffmpeg_windows():
                         if total_size > 0:
                             pct = int((downloaded / total_size) * 100)
                             try:
-                                # [FIX] Simple non-wrapping progress
                                 msg = f"    Downloading... {pct}%"
                                 sys.stdout.write(f"\r{msg}")
                                 sys.stdout.flush()
@@ -373,7 +365,6 @@ def download_ffmpeg_linux():
         return False
 
     try:
-        # [FIX] Timeout increased to 180s for Linux too
         r = requests.get(url, stream=True, allow_redirects=True, timeout=180)
         r.raise_for_status()
         
@@ -427,7 +418,7 @@ def download_ffmpeg_linux():
 def has_svtav1(cmd):
     """Checks if the given ffmpeg command supports libsvtav1"""
     try:
-        res = subprocess.run([cmd, "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        res = subprocess.run([cmd, "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
         return "libsvtav1" in res.stdout
     except:
         return False
@@ -435,7 +426,6 @@ def has_svtav1(cmd):
 def check_ffmpeg():
     global FFMPEG_CMD, FFPROBE_CMD
     
-    # 1. Check Local Static Build (Priority)
     local_ffmpeg = os.path.abspath("ffmpeg.exe" if platform.system() == "Windows" else "./ffmpeg")
     local_ffprobe = os.path.abspath("ffprobe.exe" if platform.system() == "Windows" else "./ffprobe")
     
@@ -444,13 +434,11 @@ def check_ffmpeg():
         if os.path.exists(local_ffprobe): FFPROBE_CMD = local_ffprobe
         return
 
-    # 2. Check System FFmpeg
     if shutil.which("ffmpeg") and has_svtav1("ffmpeg"):
         FFMPEG_CMD = "ffmpeg"
         FFPROBE_CMD = "ffprobe"
         return
 
-    # 3. If we are here, we have no working FFmpeg. Attempt Download.
     print("[!] Valid FFmpeg with libsvtav1 not found.")
     
     download_success = False
@@ -460,7 +448,6 @@ def check_ffmpeg():
         download_success = download_ffmpeg_linux()
         
     if download_success:
-        # Re-verify local file
         if os.path.exists(local_ffmpeg) and has_svtav1(local_ffmpeg):
             FFMPEG_CMD = local_ffmpeg
             if os.path.exists(local_ffprobe): FFPROBE_CMD = local_ffprobe
@@ -575,7 +562,7 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                 total_sec = 0; total_min = 0; audio_index = 0; subtitle_indices = []
                 try:
                     cmd_probe = [FFPROBE_CMD, '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', local_src]
-                    res = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    res = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace')
                     probe_data = json.loads(res.stdout)
                     dur = probe_data.get('format', {}).get('duration')
                     if dur: total_sec = float(dur); total_min = int(total_sec / 60)
@@ -607,7 +594,7 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                 else:
                     popen_kwargs['start_new_session'] = True
 
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True, **popen_kwargs)
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, encoding='utf-8', errors='replace', **popen_kwargs)
                 
                 with PROC_LOCK: ACTIVE_PROCS[worker_id] = proc
                 
@@ -699,24 +686,20 @@ def run_worker(args):
     print(" FRACTUM DISTRIBUTED WORKER")
     print("==================================================")
 
-    # --- [START] CONFIGURATION LOGIC ---
     config_file = "worker_config.json"
     saved_config = {}
     
-    # 1. Try to load existing config
     if os.path.exists(config_file):
         try:
             with open(config_file, 'r') as f:
-                # [FIX] Handle empty or whitespace-only files
                 content = f.read().strip()
                 if content:
                     saved_config = json.loads(content)
                 else:
                     print("[!] Config file is empty. Resetting.")
-                    f.close() # Ensure close before delete
+                    f.close()
                     os.remove(config_file)
                     
-                # Apply saved config IF the user didn't override via CLI flags
                 if args.username == DEFAULT_USERNAME and 'username' in saved_config:
                     args.username = saved_config['username']
                 if args.workername == DEFAULT_WORKERNAME and 'workername' in saved_config:
@@ -727,12 +710,9 @@ def run_worker(args):
         except Exception as e:
             print(f"[!] Warning: Could not read config file: {e}")
 
-    # 2. Interactive Setup (Only if using defaults and running in a terminal)
-    # We check sys.stdin.isatty() so we don't hang Docker/Headless servers
     if sys.stdin.isatty():
         config_changed = False
         
-        # Ask for Username if still default
         if args.username == DEFAULT_USERNAME:
             print("\n[*] First Time Setup detected.")
             print("    Please enter the USERNAME of the person running the program.")
@@ -742,7 +722,6 @@ def run_worker(args):
                 args.username = u_input
                 config_changed = True
         
-        # Ask for Workername if still default
         if args.workername == DEFAULT_WORKERNAME:
             w_default = f"Node-{int(time.time())}"
             print("\n    Please enter a name for THIS COMPUTER.")
@@ -754,7 +733,6 @@ def run_worker(args):
                 args.workername = w_default
             config_changed = True
 
-        # 3. Save Config if anything changed
         if config_changed:
             try:
                 with open(config_file, 'w') as f:
@@ -762,7 +740,6 @@ def run_worker(args):
                 print(f"[*] Configuration saved to {config_file}")
             except:
                 print("[!] Failed to save configuration file.")
-    # --- [END] CONFIGURATION LOGIC ---
 
     check_ffmpeg()
     
