@@ -236,6 +236,13 @@
                 <div class="card-header"><h3>>> ACTIVE_PROCESSES</h3></div>
                 <div id="active-list"><div style="color:#888; padding:10px;">Scanning...</div></div>
             </div>
+
+            <div class="card">
+                <div class="card-header"><h3>>> UP_NEXT</h3></div>
+                <div id="queue-list" style="max-height: 300px; overflow-y: auto;">
+                    <div style="color:#888; padding:10px;">Loading...</div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -354,7 +361,8 @@
                         user: j.worker_id,
                         file: j.filename,
                         progress: j.progress
-                    }))
+                    })),
+                    queue_items: rawData.queue_items || []
                 };
                 
                 document.getElementById('total').innerText = data.queue.total;
@@ -385,6 +393,17 @@
                         <div class="progress-bg"><div class="progress-fill" style="width: ${pct}%"></div></div>
                     </div>`;
                 }).join('') : '<div style="color:var(--text-dim); padding:10px;">// SYSTEM IDLE</div>';
+
+                const qList = document.getElementById('queue-list');
+                if (qList) {
+                    qList.innerHTML = data.queue_items.length ? data.queue_items.map(j => {
+                        const cleanName = j.filename.split('/').pop(); 
+                        return `
+                        <div class="job-item" style="border-color: rgba(204,0,255,0.1); padding: 8px;">
+                            <div class="job-file" style="color:var(--text-dim); margin:0;" title="${escapeHTML(cleanName)}">${escapeHTML(cleanName)}</div>
+                        </div>`;
+                    }).join('') : '<div style="color:var(--text-dim); padding:10px;">// QUEUE EMPTY</div>';
+                }
 
             } catch (e) { console.error(e); }
         }

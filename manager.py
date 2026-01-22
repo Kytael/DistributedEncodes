@@ -602,7 +602,8 @@ def report_status():
     
     if status == 'completed': return jsonify({"status": "ignored"}), 403
     if status == 'failed':
-        log_event("WARN", f"Worker {worker_id} (v{worker_version}) reported failure", d.get('job_id'))
+        err_msg = d.get('error', 'Unknown Error')
+        log_event("WARN", f"Worker {worker_id} (v{worker_version}) reported failure: {err_msg}", d.get('job_id'))
 
     with db_lock:
         conn = db_handler.get_connection()
@@ -637,11 +638,15 @@ def api_stats():
             
             c.execute("SELECT COUNT(*) FROM jobs WHERE status='queued'")
             queue_depth = c.fetchone()[0]
+            
+            c.execute("SELECT id, filename, file_size FROM jobs WHERE status='queued' ORDER BY id ASC LIMIT 50")
+            queue_items = [dict(r) for r in c.fetchall()]
+
             c.execute("SELECT COUNT(*) FROM jobs")
             total_count = c.fetchone()[0]
         finally:
             conn.close()
-    return jsonify({"scoreboard": sb, "active": act, "history": hist, "queue_depth": queue_depth, "total_jobs": total_count})
+    return jsonify({"scoreboard": sb, "active": act, "history": hist, "queue_depth": queue_depth, "queue_items": queue_items, "total_jobs": total_count})
 
 @app.route('/api/all_jobs')
 @requires_auth

@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "1.9.8"
+WORKER_VERSION = "1.9.9"
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
@@ -166,12 +166,20 @@ def log(worker_id, message, level="INFO"):
 
 def signal_handler(sig, frame):
     global PAUSE_REQUESTED
-    if not PAUSE_REQUESTED:
-        PAUSE_REQUESTED = True
+    if platform.system() == 'Windows':
+        sys.stdout.write('\n[!] Windows Shutdown Initiated...\n')
+        SHUTDOWN_EVENT.set()
         try:
-            sys.stdout.write('\n\n[!] PAUSE REQUESTED (Stopping gracefully...)\n')
-            sys.stdout.flush()
+            kill_processes()
         except: pass
+        sys.exit(0)
+    else:
+        if not PAUSE_REQUESTED:
+            PAUSE_REQUESTED = True
+            try:
+                sys.stdout.write('\n\n[!] PAUSE REQUESTED (Stopping gracefully...)\n')
+                sys.stdout.flush()
+            except: pass
 
 def toggle_processes(suspend=True):
     with PROC_LOCK:
