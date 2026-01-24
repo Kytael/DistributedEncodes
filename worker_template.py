@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "2.0.4"
+WORKER_VERSION = "2.0.5"
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
@@ -44,7 +44,7 @@ FFPROBE_CMD = "ffprobe"
 # Detect OS to handle Fonts
 # Use absolute path to bundled arial.ttf to ensure it works on all platforms and from any CWD
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_font_path = os.path.join(_script_dir, "arial.ttf").replace("\\", "/")
+_font_path = os.path.join(_script_dir, "arial.ttf").replace("\\", "/").replace(":", "\\\\:")
 FONT_FILE = f":fontfile='{_font_path}'" 
 
 ENCODING_CONFIG = {
@@ -594,6 +594,7 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                 cmd.extend(['-c:v', ENCODING_CONFIG["VIDEO_CODEC"], '-preset', ENCODING_CONFIG["VIDEO_PRESET"], '-crf', ENCODING_CONFIG["VIDEO_CRF"], '-pix_fmt', ENCODING_CONFIG["VIDEO_PIX_FMT"], '-vf', ENCODING_CONFIG["VIDEO_SCALE"], '-c:a', ENCODING_CONFIG["AUDIO_CODEC"], '-b:a', ENCODING_CONFIG["AUDIO_BITRATE"], '-ac', ENCODING_CONFIG["AUDIO_CHANNELS"], '-c:s', ENCODING_CONFIG["SUBTITLE_CODEC"], '-progress', 'pipe:1', local_dst])
                 
                 start_enc = time.time(); last_rep = 0
+                log_buffer = []
                 
                 popen_kwargs = {}
                 if platform.system() == 'Windows':
@@ -610,6 +611,7 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                         time.sleep(0.2); continue
 
                     line = proc.stdout.readline()
+                    if line: log_buffer.append(line); log_buffer = log_buffer[-50:]
                     if not line and proc.poll() is not None: break
                     
                     if "out_time=" in line and "N/A" not in line and total_sec > 0:
@@ -670,6 +672,9 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                     if SHUTDOWN_EVENT.is_set(): err_msg = "Aborted by user/update"
                     
                     log(worker_id, err_msg, "ERROR")
+                    log(worker_id, "--- FFmpeg Output Dump ---", "ERROR")
+                    for l in log_buffer: safe_print(f"    {l.strip()}")
+                    log(worker_id, "--------------------------", "ERROR")
                     post_status("failed", error_msg=err_msg)
 
                 if os.path.exists(local_src): os.remove(local_src)
