@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "2.0.2"
+WORKER_VERSION = "2.0.3"
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
@@ -44,7 +44,7 @@ FFPROBE_CMD = "ffprobe"
 # Detect OS to handle Fonts
 FONT_FILE = ""
 if platform.system() == "Windows":
-    FONT_FILE = r":fontfile='C\:/Windows/Fonts/arial.ttf'" 
+    FONT_FILE = ":fontfile='arial.ttf'" 
 else:
     FONT_FILE = "" 
 
