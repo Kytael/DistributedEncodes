@@ -111,6 +111,14 @@
             </div>
         </div>
 
+        <div class="toolbar" style="margin-top: 20px;">
+            <div class="label">CONFIG:</div>
+            <div class="toolbar-group">
+                <input type="text" id="config-remote-url" placeholder="Remote Source URL..." style="width: 350px;">
+                <button onclick="saveConfig()" style="border-color: var(--neon-purple); color: var(--neon-purple);">SAVE</button>
+            </div>
+        </div>
+
         <div class="toolbar" style="margin-top: 30px;">
             <div class="label">LOG LEVEL:</div>
             <div class="toolbar-group">
@@ -151,8 +159,29 @@
         }
 
         async function refreshAll() {
-            await Promise.all([loadJobs(), loadLogs()]);
+            await Promise.all([loadJobs(), loadLogs(), loadConfig()]);
             applyFilters();
+        }
+
+        async function loadConfig() {
+            try {
+                const r = await fetch('/api/get_config');
+                const d = await r.json();
+                const field = document.getElementById('config-remote-url');
+                if(d.REMOTE_SOURCE_URL && document.activeElement !== field) {
+                    field.value = d.REMOTE_SOURCE_URL;
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        async function saveConfig() {
+            const url = document.getElementById('config-remote-url').value;
+            await fetch('/api/update_config', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({REMOTE_SOURCE_URL: url})
+            });
+            alert("Configuration Saved.");
+            loadConfig();
         }
 
         async function loadJobs() {

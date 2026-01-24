@@ -336,8 +336,9 @@ def scan_and_queue():
     if REMOTE_SOURCE_URL:
         print(f"[*] Scanning REMOTE Source: {REMOTE_SOURCE_URL} ...")
         remote_files = scan_remote_http(REMOTE_SOURCE_URL)
+        # Pass the current REMOTE_SOURCE_URL as the source_url for these files
         for r_id, r_name, r_size in remote_files:
-            files_to_add.append((r_id, r_name, r_size, 'remote'))
+            files_to_add.append((r_id, r_name, r_size, 'remote', REMOTE_SOURCE_URL))
 
     # 3. Update DB
     count_new = 0
@@ -345,12 +346,19 @@ def scan_and_queue():
         conn = db_handler.get_connection()
         try:
             cursor = conn.cursor()
-            for job_id, fname, fsize, src_type in files_to_add:
+            for item in files_to_add:
+                # Handle tuple unpacking for both local (4 items) and remote (5 items)
+                if len(item) == 5:
+                    job_id, fname, fsize, src_type, src_url = item
+                else:
+                    job_id, fname, fsize, src_type = item
+                    src_url = None
+
                 cursor.execute("SELECT id FROM jobs WHERE id=?", (job_id,))
                 if not cursor.fetchone():
                     cursor.execute(
-                        "INSERT INTO jobs (id, filename, status, last_updated, file_size, source_type) VALUES (?, ?, 'queued', ?, ?, ?)", 
-                        (job_id, fname, datetime.now(), fsize, src_type)
+                        "INSERT INTO jobs (id, filename, status, last_updated, file_size, source_type, source_url) VALUES (?, ?, 'queued', ?, ?, ?, ?)", 
+                        (job_id, fname, datetime.now(), fsize, src_type, src_url)
                     )
                     count_new += 1
             conn.commit()
@@ -364,22 +372,29 @@ def scan_and_queue():
     with db_lock:
         conn = db_handler.get_connection()
         try:
+            # Fetch source_type and source_url as well
             cursor = conn.cursor()
-            cursor.execute("SELECT id, filename, file_size FROM jobs WHERE status = 'queued'")
+            cursor.execute("SELECT id, filename, file_size, source_type, source_url FROM jobs WHERE status = 'queued'")
             for row in cursor.fetchall():
-                if row[0] not in queued_job_ids:
-                    if REMOTE_SOURCE_URL:
-                        dl_link = urljoin(REMOTE_SOURCE_URL, quote(row[0]))
+                jid, fname, fsize, stype, surl = row
+                if jid not in queued_job_ids:
+                    dl_link = ""
+                    if stype == 'remote':
+                        # Use stored URL if available, else fallback to global config
+                        base_url = surl if surl else REMOTE_SOURCE_URL
+                        if base_url:
+                            dl_link = urljoin(base_url, quote(jid))
                     else:
-                        dl_link = f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(row[0], safe='/')}"
+                        dl_link = f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(jid, safe='/')}"
                     
-                    job_queue.put({ 
-                        "id": row[0], 
-                        "filename": row[1], 
-                        "file_size": row[2], 
-                        "download_url": dl_link 
-                    })
-                    queued_job_ids.add(row[0])
+                    if dl_link:
+                        job_queue.put({ 
+                            "id": jid, 
+                            "filename": fname, 
+                            "file_size": fsize, 
+                            "download_url": dl_link 
+                        })
+                        queued_job_ids.add(jid)
         finally:
             conn.close()
 
@@ -429,6 +444,8 @@ def init_db():
         try: cursor.execute("ALTER TABLE jobs ADD COLUMN worker_version TEXT")
         except sqlite3.OperationalError: pass
         try: cursor.execute("ALTER TABLE jobs ADD COLUMN source_type TEXT DEFAULT 'local'")
+        except sqlite3.OperationalError: pass
+        try: cursor.execute("ALTER TABLE jobs ADD COLUMN source_url TEXT")
         except sqlite3.OperationalError: pass
         
         conn.commit()
@@ -525,13 +542,19 @@ def get_job():
                             query_parts.append("id LIKE ?")
                             params.append(f"{folder_filter}%")
                         
-                        sql = f"SELECT id, filename, file_size, source_type FROM jobs WHERE {' AND '.join(query_parts)} ORDER BY id ASC LIMIT 1"
+                        sql = f"SELECT id, filename, file_size, source_type, source_url FROM jobs WHERE {' AND '.join(query_parts)} ORDER BY id ASC LIMIT 1"
                         c.execute(sql, tuple(params)); row = c.fetchone()
                         if row: job = dict(row); break
                 
                 if job:
-                    if job['source_type'] == 'remote' and REMOTE_SOURCE_URL:
-                         job['download_url'] = urljoin(REMOTE_SOURCE_URL, quote(job['id']))
+                    if job['source_type'] == 'remote':
+                        # Use stored URL if available, else fallback
+                        base_url = job.get('source_url') if job.get('source_url') else REMOTE_SOURCE_URL
+                        if base_url:
+                            job['download_url'] = urljoin(base_url, quote(job['id']))
+                        else:
+                             # Fallback for old remote jobs if config is gone (might fail, but best effort)
+                             job['download_url'] = "" 
                     else:
                          job['download_url'] = f"{SERVER_URL_DISPLAY.rstrip('/')}/download_source/{quote(job['id'], safe='/')}"
 
@@ -697,6 +720,23 @@ def admin_action():
         finally:
             conn.close()
     return jsonify({"status": "ok"})
+
+@app.route('/api/get_config')
+@requires_auth
+def get_config():
+    return jsonify({"REMOTE_SOURCE_URL": REMOTE_SOURCE_URL})
+
+@app.route('/api/update_config', methods=['POST'])
+@requires_auth
+def update_config():
+    global REMOTE_SOURCE_URL
+    data = request.json
+    if 'REMOTE_SOURCE_URL' in data:
+        new_url = data['REMOTE_SOURCE_URL'].strip()
+        if not new_url: new_url = None
+        REMOTE_SOURCE_URL = new_url
+        log_event("WARN", f"Admin updated Remote Source URL to: {REMOTE_SOURCE_URL}")
+    return jsonify({"status": "ok", "new_value": REMOTE_SOURCE_URL})
 
 @app.route('/api/rescan_db')
 @requires_auth
