@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "2.0.3"
+WORKER_VERSION = "2.0.4"
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
@@ -42,11 +42,10 @@ FFMPEG_CMD = "ffmpeg"
 FFPROBE_CMD = "ffprobe"
 
 # Detect OS to handle Fonts
-FONT_FILE = ""
-if platform.system() == "Windows":
-    FONT_FILE = ":fontfile='arial.ttf'" 
-else:
-    FONT_FILE = "" 
+# Use absolute path to bundled arial.ttf to ensure it works on all platforms and from any CWD
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_font_path = os.path.join(_script_dir, "arial.ttf").replace("\\", "/")
+FONT_FILE = f":fontfile='{_font_path}'" 
 
 ENCODING_CONFIG = {
     "VIDEO_CODEC": "libsvtav1",
