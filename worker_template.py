@@ -44,7 +44,7 @@ FFPROBE_CMD = "ffprobe"
 # Detect OS to handle Fonts
 FONT_FILE = ""
 if platform.system() == "Windows":
-    FONT_FILE = ":fontfile='C:/Windows/Fonts/arial.ttf'" 
+    FONT_FILE = r":fontfile='C\:/Windows/Fonts/arial.ttf'" 
 else:
     FONT_FILE = "" 
 
