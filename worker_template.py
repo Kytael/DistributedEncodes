@@ -530,35 +530,43 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                 
                 post_status("downloading", 0)
                 
-                try:
-                    with requests.get(dl_url, stream=True, timeout=30) as r:
-                        r.raise_for_status()
-                        total_size = int(r.headers.get('content-length', 0))
-                        downloaded = 0; last_rep = 0
-                        with open(local_src, 'wb') as f:
-                            for chunk in r.iter_content(chunk_size=8192):
-                                if PAUSE_REQUESTED: 
-                                    while PAUSE_REQUESTED: time.sleep(1)
-                                    if SHUTDOWN_EVENT.is_set(): raise Exception("Shutdown")
-                                
-                                if quota_tracker: quota_tracker.add_usage(len(chunk))
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                pct = int((downloaded/total_size)*100) if total_size > 0 else 0
-                                
-                                if single_mode: print_progress(worker_id, downloaded, total_size, prefix='DL')
-                                else: update_status(f"DL {pct}%")
+                download_success = False
+                for attempt in range(3):
+                    try:
+                        with requests.get(dl_url, stream=True, timeout=60) as r:
+                            r.raise_for_status()
+                            total_size = int(r.headers.get('content-length', 0))
+                            downloaded = 0; last_rep = 0
+                            with open(local_src, 'wb') as f:
+                                for chunk in r.iter_content(chunk_size=65536):
+                                    if PAUSE_REQUESTED: 
+                                        while PAUSE_REQUESTED: time.sleep(1)
+                                        if SHUTDOWN_EVENT.is_set(): raise Exception("Shutdown")
+                                    
+                                    if chunk:
+                                        if quota_tracker: quota_tracker.add_usage(len(chunk))
+                                        f.write(chunk)
+                                        downloaded += len(chunk)
+                                        pct = int((downloaded/total_size)*100) if total_size > 0 else 0
+                                        
+                                        if single_mode: print_progress(worker_id, downloaded, total_size, prefix='DL')
+                                        else: update_status(f"DL {pct}%")
 
-                                if time.time() - last_rep > 30:
-                                    post_status("downloading", pct)
-                                    last_rep = time.time()
-                    
-                    if quota_tracker: quota_tracker.force_save()
-                    if single_mode: print_progress(worker_id, total_size, total_size, prefix='DL', suffix='OK')
+                                        if time.time() - last_rep > 30:
+                                            post_status("downloading", pct)
+                                            last_rep = time.time()
+                        
+                        if quota_tracker: quota_tracker.force_save()
+                        if single_mode: print_progress(worker_id, total_size, total_size, prefix='DL', suffix='OK')
+                        download_success = True
+                        break
+                    except Exception as e:
+                        log(worker_id, f"Download attempt {attempt+1}/3 failed: {e}", "WARNING")
+                        time.sleep(5)
 
-                except Exception as e:
-                    err_msg = str(e)
-                    log(worker_id, f"Download failed: {err_msg}", "ERROR")
+                if not download_success:
+                    err_msg = "Download failed after 3 attempts"
+                    log(worker_id, err_msg, "ERROR")
                     post_status("failed", error_msg=err_msg)
                     time.sleep(5); continue
 
