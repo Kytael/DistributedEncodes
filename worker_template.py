@@ -22,8 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "2.0.9"
-
+WORKER_VERSION = "2.1.0" 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
 SHUTDOWN_EVENT = threading.Event()
@@ -615,16 +614,32 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                             break
                 except: pass
 
-                audio_filter = "pan=mono|c0=c0" # Fallback (Drop extras)
+                # Updated Audio Filter with async resampling
+                audio_filter = "pan=mono|c0=c0,aresample=async=1" # Fallback (Drop extras)
                 if audio_channels == 2:
-                    audio_filter = "pan=mono|c0=0.5*c0+0.5*c1" # Proper Stereo Downmix
+                    audio_filter = "pan=mono|c0=0.5*c0+0.5*c1,aresample=async=1" # Proper Stereo Downmix
                 elif audio_channels == 1:
-                    audio_filter = "pan=mono|c0=c0" # Passthrough
+                    audio_filter = "pan=mono|c0=c0,aresample=async=1" # Passthrough
                 
                 cmd = [FFMPEG_CMD, '-y', '-i', local_src, '-map', '0:v:0', '-map', f'0:{audio_index}']
                 for idx in subtitle_indices: cmd.extend(['-map', f'0:{idx}'])
                 # Replace -ac with -af pan for robustness
-                cmd.extend(['-c:v', ENCODING_CONFIG["VIDEO_CODEC"], '-preset', ENCODING_CONFIG["VIDEO_PRESET"], '-crf', ENCODING_CONFIG["VIDEO_CRF"], '-pix_fmt', ENCODING_CONFIG["VIDEO_PIX_FMT"], '-vf', video_filter, '-c:a', ENCODING_CONFIG["AUDIO_CODEC"], '-b:a', ENCODING_CONFIG["AUDIO_BITRATE"], '-af', audio_filter, '-c:s', ENCODING_CONFIG["SUBTITLE_CODEC"], '-progress', 'pipe:1', local_dst])
+                # ADDED: -fps_mode passthrough -avoid_negative_ts make_zero
+                cmd.extend([
+                    '-fps_mode', 'passthrough',
+                    '-avoid_negative_ts', 'make_zero',
+                    '-c:v', ENCODING_CONFIG["VIDEO_CODEC"], 
+                    '-preset', ENCODING_CONFIG["VIDEO_PRESET"], 
+                    '-crf', ENCODING_CONFIG["VIDEO_CRF"], 
+                    '-pix_fmt', ENCODING_CONFIG["VIDEO_PIX_FMT"], 
+                    '-vf', video_filter, 
+                    '-c:a', ENCODING_CONFIG["AUDIO_CODEC"], 
+                    '-b:a', ENCODING_CONFIG["AUDIO_BITRATE"], 
+                    '-af', audio_filter, 
+                    '-c:s', ENCODING_CONFIG["SUBTITLE_CODEC"], 
+                    '-progress', 'pipe:1', 
+                    local_dst
+                ])
                 
                 start_enc = time.time(); last_rep = 0
                 log_buffer = []
