@@ -61,11 +61,17 @@ try:
     except ImportError:
         REMOTE_SOURCE_URL = None
 
-    # [NEW] Load DB_MODE
+    # Load DB_MODE
     try:
         from config import DB_MODE
     except ImportError:
         DB_MODE = 'disk'
+        
+    # [ADDED] Load Rate Limit
+    try:
+        from config import RATE_LIMIT_JOBS_PER_HOUR
+    except ImportError:
+        RATE_LIMIT_JOBS_PER_HOUR = 20
 
 except ImportError:
     print("[!] Critical Error: config.py not found.")
@@ -89,6 +95,10 @@ limiter = Limiter(
 job_queue = queue.Queue()
 queued_job_ids = set()
 db_lock = threading.Lock()
+
+# [ADDED] Job Rate Limiter Globals
+job_limit_lock = threading.Lock()
+ip_job_history = {} # Format: {'1.2.3.4': [timestamp1, timestamp2]}
 
 # ==============================================================================
 # ADVANCED DATABASE HANDLER (RAM/DISK)
@@ -448,6 +458,10 @@ def init_db():
         try: cursor.execute("ALTER TABLE jobs ADD COLUMN source_url TEXT")
         except sqlite3.OperationalError: pass
         
+        # [ADDED] Track Retries
+        try: cursor.execute("ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError: pass
+        
         conn.commit()
         conn.close()
 
@@ -497,6 +511,25 @@ def get_job():
     series_id = request.args.get('series_id')
     worker_id = sanitize_input(request.args.get('worker_id'))
     worker_version = sanitize_input(request.args.get('version'))
+    
+    # [ADDED] Rate Limit Check -------------------------------------------
+    client_ip = get_remote_address() # Uses the IP from flask-limiter utility
+    now = time.time()
+    
+    with job_limit_lock:
+        # 1. Cleanup old history for this IP (older than 1 hour)
+        if client_ip in ip_job_history:
+            ip_job_history[client_ip] = [t for t in ip_job_history[client_ip] if now - t < 3600]
+            if not ip_job_history[client_ip]:
+                del ip_job_history[client_ip]
+        
+        # 2. Check if limit exceeded
+        current_count = len(ip_job_history.get(client_ip, []))
+        if current_count >= RATE_LIMIT_JOBS_PER_HOUR:
+            # Optional: Log the blocked attempt if you want to see who it is
+            # print(f"Rate limit exceeded for {client_ip}") 
+            return jsonify({"status": "empty", "message": "Rate limit exceeded"}), 429
+    # --------------------------------------------------------------------
     
     # Version check for Remote Jobs
     if REMOTE_SOURCE_URL and not is_version_sufficient(worker_version, "1.9.0"):
@@ -561,6 +594,14 @@ def get_job():
                     conn.execute("UPDATE jobs SET status='processing', worker_id=?, worker_version=?, last_updated=?, started_at=? WHERE id=?", 
                         (worker_id, worker_version, datetime.now(), datetime.now(), job['id']))
                     conn.commit()
+
+                    # [ADDED] Record Success ------------------------------------
+                    with job_limit_lock:
+                        if client_ip not in ip_job_history:
+                            ip_job_history[client_ip] = []
+                        ip_job_history[client_ip].append(time.time())
+                    # -----------------------------------------------------------
+
                     return jsonify({"status": "ok", "job": job})
             finally:
                 conn.close()
@@ -592,7 +633,23 @@ def upload_result():
             os.remove(temp_path)
             with db_lock:
                 conn = db_handler.get_connection()
-                conn.execute("UPDATE jobs SET status='failed', last_updated=? WHERE id=?", (datetime.now(), job_id))
+                
+                # [ADDED] Auto-Retry Logic for Uploads
+                c = conn.cursor()
+                c.execute("SELECT retry_count FROM jobs WHERE id=?", (job_id,))
+                row = c.fetchone()
+                retries = row[0] if row and row[0] is not None else 0
+
+                if retries < 1:
+                    log_event("INFO", f"Upload rejected. Auto-retrying (Attempt {retries+1}/1).", job_id)
+                    conn.execute("""
+                        UPDATE jobs 
+                        SET status='queued', progress=0, worker_id=NULL, last_updated=?, retry_count=? 
+                        WHERE id=?""", 
+                        (datetime.now(), retries + 1, job_id))
+                else:
+                    conn.execute("UPDATE jobs SET status='failed', last_updated=? WHERE id=?", (datetime.now(), job_id))
+                
                 conn.commit(); conn.close()
             return jsonify({"status": "error", "message": reason}), 400
 
@@ -622,17 +679,36 @@ def report_status():
     d = request.json; status = d.get('status')
     worker_id = sanitize_input(d.get('worker_id'))
     worker_version = sanitize_input(d.get('version'))
+    job_id = d.get('job_id')
     
     if status == 'completed': return jsonify({"status": "ignored"}), 403
     if status == 'failed':
         err_msg = d.get('error', 'Unknown Error')
-        log_event("WARN", f"Worker {worker_id} (v{worker_version}) reported failure: {err_msg}", d.get('job_id'))
+        log_event("WARN", f"Worker {worker_id} (v{worker_version}) reported failure: {err_msg}", job_id)
 
     with db_lock:
         conn = db_handler.get_connection()
         try:
+            # [ADDED] Auto-Retry Logic -----------------------------------------
+            if status == 'failed':
+                c = conn.cursor()
+                c.execute("SELECT retry_count FROM jobs WHERE id=?", (job_id,))
+                row = c.fetchone()
+                retries = row[0] if row and row[0] is not None else 0
+                
+                if retries < 1: # Retry once
+                    log_event("INFO", f"Auto-retrying job (Attempt {retries+1}/1)", job_id)
+                    conn.execute("""
+                        UPDATE jobs 
+                        SET status='queued', progress=0, worker_id=NULL, last_updated=?, retry_count=? 
+                        WHERE id=?""", 
+                        (datetime.now(), retries + 1, job_id))
+                    conn.commit()
+                    return jsonify({"status": "retrying"})
+            # ------------------------------------------------------------------
+
             sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=? WHERE id=?"
-            params = [status, worker_id, d.get('progress',0), datetime.now(), d.get('job_id')]
+            params = [status, worker_id, d.get('progress',0), datetime.now(), job_id]
             if d.get('duration', 0) > 0: 
                 sql = "UPDATE jobs SET status=?, worker_id=?, progress=?, last_updated=?, duration=? WHERE id=?"
                 params.insert(4, d.get('duration'))
