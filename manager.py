@@ -669,6 +669,17 @@ def upload_result():
         # [CRITICAL] Immediate Sync to Disk
         db_handler.sync_to_disk()
         
+        # [ADDED] Rate Limit Refund (Good behavior bonus)
+        client_ip = get_remote_address()
+        now = time.time()
+        with job_limit_lock:
+             # 1. Cleanup
+             if client_ip in ip_job_history:
+                 ip_job_history[client_ip] = [t for t in ip_job_history[client_ip] if now - t < 3600]
+             # 2. Refund (Remove one strike)
+             if client_ip in ip_job_history and ip_job_history[client_ip]:
+                 ip_job_history[client_ip].pop(0)
+
         log_event("INFO", f"Job completed by {worker_id}", job_id)
         return jsonify({"status": "success"})
     return jsonify({"status": "error"}), 400
