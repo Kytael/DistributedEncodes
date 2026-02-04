@@ -15,7 +15,6 @@ SERVER_URL_DISPLAY = "https://encode.fractumseraph.net/"
 # ==============================================================================
 ADMIN_USER = "admin"
 ADMIN_PASS = "changeme"  # [!] CHANGE THIS!
-
 # Security Tokens (Generate new random strings for production)
 WORKER_SECRET = "ChangeThisToALongRandomString" 
 SECRET_KEY = "ChangeThisToAnotherRandomString"
@@ -33,7 +32,7 @@ COMPLETED_DIRECTORY = "./completed_media"
 # If set, the manager will scan this URL for mp4/mkv files.
 # Workers v1.9.0+ will download directly from this URL.
 # Example: "http://192.168.1.100:8080/"
-# REMOTE_SOURCE_URL = "http://YOUR_WINDOWS_PC_IP:PORT/" 
+# REMOTE_SOURCE_URL = "http://IP:PORT/" 
 REMOTE_SOURCE_URL = None
 
 WORKER_TEMPLATE_FILE = "worker_template.py"
@@ -53,3 +52,9 @@ DB_MODE = 'ram'
 # True  = Faster, better concurrency (Recommended for Local Disk & RAM)
 # False = Slower, strictly serial (Use ONLY if DB is on a Network Share/NAS)
 USE_WAL_MODE = True
+
+# ==============================================================================
+# RATE LIMITING
+# ==============================================================================
+# Limits how many jobs a single IP can TAKE per hour.
+RATE_LIMIT_JOBS_PER_HOUR = 15
