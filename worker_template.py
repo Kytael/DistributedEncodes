@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_MANAGER_URL = "https://encode.fractumseraph.net/"
 DEFAULT_USERNAME = "Anonymous"
 DEFAULT_WORKERNAME = f"Node-{int(time.time())}"
-WORKER_VERSION = "2.1.1"  # Incremented to trigger update
+WORKER_VERSION = "2.5.0" # Incremented for Mono Downmix
 
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "DefaultInsecureSecret")
 
@@ -51,8 +51,8 @@ ENCODING_CONFIG = {
     "VIDEO_PIX_FMT": "yuv420p",
     "VIDEO_SCALE": "scale=-2:480",
     "AUDIO_CODEC": "libopus",
-    "AUDIO_BITRATE": "12k",      
-    "AUDIO_CHANNELS": "1",       
+    "AUDIO_BITRATE": "24k",      # Perfect for Mono Speech
+    "AUDIO_CHANNELS": "1",       # CHANGED: 2 -> 1 (Mono) for better quality
     "SUBTITLE_CODEC": "mov_text", 
     "OUTPUT_EXT": ".mp4"
 }
@@ -615,17 +615,23 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                             break
                 except: pass
 
-                # Updated Audio Filter with async resampling
-                audio_filter = "pan=mono|c0=c0,aresample=async=1" # Fallback (Drop extras)
-                if audio_channels == 2:
-                    audio_filter = "pan=mono|c0=0.5*c0+0.5*c1,aresample=async=1" # Proper Stereo Downmix
-                elif audio_channels == 1:
-                    audio_filter = "pan=mono|c0=c0,aresample=async=1" # Passthrough
+                # AUDIO FILTER FIX (MONO + DIALOGUE FOCUS)
+                audio_filter = "aresample=async=1" 
                 
+                if audio_channels > 2:
+                    # 5.1 -> Mono: Mix Center (FC) strongly (50%) to ensure dialogue is clear
+                    # c0 = 0.5*FC + 0.25*FL + 0.25*FR + 0.1*Surround
+                    audio_filter = "pan=mono|c0=0.5*FC+0.25*FL+0.25*FR+0.1*BL+0.1*BR,aresample=async=1"
+                elif audio_channels == 2:
+                    # Stereo -> Mono: Standard Mix
+                    audio_filter = "pan=mono|c0=0.5*c0+0.5*c1,aresample=async=1"
+                else:
+                    # Mono -> Mono: Passthrough
+                    audio_filter = "aresample=async=1"
+
                 cmd = [FFMPEG_CMD, '-y', '-i', local_src, '-map', '0:v:0', '-map', f'0:{audio_index}']
                 for idx in subtitle_indices: cmd.extend(['-map', f'0:{idx}'])
-                # Replace -ac with -af pan for robustness
-                # ADDED: -fps_mode passthrough -avoid_negative_ts make_zero
+                
                 cmd.extend([
                     '-fps_mode', 'passthrough',
                     '-avoid_negative_ts', 'make_zero',
@@ -636,6 +642,7 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                     '-vf', video_filter, 
                     '-c:a', ENCODING_CONFIG["AUDIO_CODEC"], 
                     '-b:a', ENCODING_CONFIG["AUDIO_BITRATE"], 
+                    '-ac', ENCODING_CONFIG["AUDIO_CHANNELS"], # Enforce 1 channel (Mono)
                     '-af', audio_filter, 
                     '-c:s', ENCODING_CONFIG["SUBTITLE_CODEC"], 
                     '-progress', 'pipe:1', 
@@ -708,14 +715,34 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
 
                     def upload_cb(pct): post_status("uploading", pct)
 
-                    with ProgressFileReader(local_dst, upload_cb) as f:
-                        requests.post(f"{manager_url}/upload_result", 
-                                      files={'file': (job_id, f)}, 
-                                      data={'job_id': job_id, 'worker_id': worker_id, 'duration': total_min},
-                                      headers=get_auth_headers())
-                    
-                    if single_mode: print_progress(worker_id, 100, 100, prefix='Up', suffix='OK')
-                    log(worker_id, "Job complete.")
+                    # RETRY LOOP for Uploads
+                    upload_success = False
+                    for up_attempt in range(3):
+                        try:
+                            with ProgressFileReader(local_dst, upload_cb) as f:
+                                # Timeout = 300s (5 minutes) for socket silence
+                                r = requests.post(f"{manager_url}/upload_result", 
+                                              files={'file': (job_id, f)}, 
+                                              data={'job_id': job_id, 'worker_id': worker_id, 'duration': total_min},
+                                              headers=get_auth_headers(),
+                                              timeout=300)
+                                if r.status_code == 200:
+                                    upload_success = True
+                                    break
+                                else:
+                                    log(worker_id, f"Upload rejected by server: {r.status_code}", "WARN")
+                        except Exception as e:
+                            log(worker_id, f"Upload attempt {up_attempt+1} failed/timed out: {e}", "WARN")
+                            time.sleep(10) # Wait 10s before retry
+
+                    if upload_success:
+                        if single_mode: print_progress(worker_id, 100, 100, prefix='Up', suffix='OK')
+                        log(worker_id, "Job complete.")
+                    else:
+                        err_msg = "Upload failed after 3 attempts"
+                        log(worker_id, err_msg, "ERROR")
+                        post_status("failed", error_msg=err_msg)
+
                 else:
                     err_msg = f"FFmpeg exited with code {proc.returncode}"
                     if SHUTDOWN_EVENT.is_set(): err_msg = "Aborted by user/update"
