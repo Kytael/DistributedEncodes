@@ -2,21 +2,26 @@ import requests
 import argparse
 import time
 
-# Try to load config, or fallback to defaults
+# CONFIGURATION
+# ---------------------------------------------------------
+# We point directly to your public domain now.
+MANAGER_URL = "https://encode.fractumseraph.net"
+
+# If you haven't changed the default credentials in config.py, 
+# you might need to update these to match what is on your server.
 try:
-    from config import ADMIN_USER, ADMIN_PASS, SERVER_PORT
+    from config import ADMIN_USER, ADMIN_PASS
 except:
     print("[!] Config not found, using default credentials.")
     ADMIN_USER = "admin"
     ADMIN_PASS = "password"
-    SERVER_PORT = 5000
-
-MANAGER_URL = f"http://127.0.0.1:{SERVER_PORT}"
+# ---------------------------------------------------------
 
 def run_archive():
     print("==================================================")
     print(" FRACTUM MAINTENANCE: ARCHIVE HISTORY")
     print("==================================================")
+    print(f"Target Server: {MANAGER_URL}")
     print("This will:")
     print("1. Rename all COMPLETED jobs in the database.")
     print("2. Trigger a re-scan of the Source Folder.")
@@ -36,10 +41,11 @@ def run_archive():
         url = f"{MANAGER_URL}/api/admin_action"
         payload = {"action": "archive_history"}
         
-        # FIXED: Added Origin header to satisfy CSRF protection
+        # FIXED: Headers must match the PUBLIC domain exactly
         headers = {
             'Origin': MANAGER_URL,
-            'Referer': MANAGER_URL
+            'Referer': MANAGER_URL,
+            'User-Agent': 'FractumMaintenance/1.0'
         }
         
         r = requests.post(url, json=payload, headers=headers, auth=(ADMIN_USER, ADMIN_PASS))
@@ -57,7 +63,6 @@ def run_archive():
     print("[*] Triggering Database Rescan...")
     try:
         url = f"{MANAGER_URL}/api/rescan_db"
-        # GET requests usually don't need CSRF headers, but adding them doesn't hurt
         r = requests.get(url, auth=(ADMIN_USER, ADMIN_PASS))
         if r.status_code == 200:
             print("[+] Rescan complete. Jobs should now be queued!")
