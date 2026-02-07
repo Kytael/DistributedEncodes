@@ -35,7 +35,14 @@ def run_archive():
     try:
         url = f"{MANAGER_URL}/api/admin_action"
         payload = {"action": "archive_history"}
-        r = requests.post(url, json=payload, auth=(ADMIN_USER, ADMIN_PASS))
+        
+        # FIXED: Added Origin header to satisfy CSRF protection
+        headers = {
+            'Origin': MANAGER_URL,
+            'Referer': MANAGER_URL
+        }
+        
+        r = requests.post(url, json=payload, headers=headers, auth=(ADMIN_USER, ADMIN_PASS))
         
         if r.status_code == 200:
             print("[+] Jobs successfully archived.")
@@ -50,6 +57,7 @@ def run_archive():
     print("[*] Triggering Database Rescan...")
     try:
         url = f"{MANAGER_URL}/api/rescan_db"
+        # GET requests usually don't need CSRF headers, but adding them doesn't hurt
         r = requests.get(url, auth=(ADMIN_USER, ADMIN_PASS))
         if r.status_code == 200:
             print("[+] Rescan complete. Jobs should now be queued!")
