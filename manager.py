@@ -727,6 +727,18 @@ def admin_action():
             elif action == 'clear_stale':
                 cutoff = datetime.now() - timedelta(minutes=10)
                 c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE status IN ('processing', 'downloading', 'uploading') AND last_updated < ?", (datetime.now(), cutoff))
+            elif action == 'archive_history':
+                # Renames completed jobs so they can be re-scanned as new
+                # while preserving their stats for the scoreboard
+                ts = int(time.time())
+                # Filter so we don't re-archive already archived items
+                c.execute("SELECT id FROM jobs WHERE status='completed' AND id NOT LIKE 'HISTORY_%'")
+                rows = c.fetchall()
+                for (jid,) in rows:
+                    new_id = f"HISTORY_{ts}_{jid}"
+                    c.execute("UPDATE jobs SET id = ? WHERE id = ?", (new_id, jid))
+                log_event("WARN", f"Admin archived {len(rows)} jobs. They will be re-scanned as new.")
+                
             conn.commit()
         finally:
             conn.close()
@@ -800,3 +812,4 @@ if __name__ == '__main__':
     print(f"[*] Manager running at {SERVER_URL_DISPLAY}")
     print("[!] WARNING: Running in dev mode. Use 'gunicorn manager:app' for production.")
     app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
+
