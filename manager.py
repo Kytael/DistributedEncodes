@@ -93,6 +93,9 @@ job_queue = queue.Queue()
 queued_job_ids = set()
 db_lock = threading.Lock()
 
+# Cache for outdated worker logs to prevent spamming DB
+OUTDATED_LOG_CACHE = {} 
+
 # ==============================================================================
 # ADVANCED DATABASE HANDLER (RAM/DISK)
 # ==============================================================================
@@ -503,7 +506,13 @@ def get_job():
     
     # [ENFORCEMENT] Check Minimum Client Version
     if not is_version_sufficient(worker_version, MIN_CLIENT_VERSION):
-        # Reject older workers. They will sleep and check for updates eventually.
+        # LOGGING ADDED: Log specific workers (throttled to 5 mins) to prove they are alive
+        now = time.time()
+        last_log = OUTDATED_LOG_CACHE.get(worker_id, 0)
+        if now - last_log > 300: # Log only once every 5 minutes per worker
+            log_event("WARN", f"Outdated Worker Denied: {worker_id} (v{worker_version}). Waiting for auto-update.")
+            OUTDATED_LOG_CACHE[worker_id] = now
+            
         return jsonify({"status": "empty", "message": "Update Required"}), 200
 
     search_phases = []
