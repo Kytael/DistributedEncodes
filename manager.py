@@ -812,4 +812,3 @@ if __name__ == '__main__':
     print(f"[*] Manager running at {SERVER_URL_DISPLAY}")
     print("[!] WARNING: Running in dev mode. Use 'gunicorn manager:app' for production.")
     app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
-
