@@ -728,20 +728,26 @@ def admin_action():
                 cutoff = datetime.now() - timedelta(minutes=10)
                 c.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE status IN ('processing', 'downloading', 'uploading') AND last_updated < ?", (datetime.now(), cutoff))
             elif action == 'archive_history':
-                # Renames completed jobs so they can be re-scanned as new
-                # while preserving their stats for the scoreboard
                 ts = int(time.time())
-                # Filter so we don't re-archive already archived items
                 c.execute("SELECT id FROM jobs WHERE status='completed' AND id NOT LIKE 'HISTORY_%'")
                 rows = c.fetchall()
                 for (jid,) in rows:
                     new_id = f"HISTORY_{ts}_{jid}"
                     c.execute("UPDATE jobs SET id = ? WHERE id = ?", (new_id, jid))
-                log_event("WARN", f"Admin archived {len(rows)} jobs. They will be re-scanned as new.")
+                log_event("WARN", f"Admin archived {len(rows)} jobs.")
+            elif action == 'purge_queue':
+                # Deletes all currently queued jobs to force a clean re-scan
+                c.execute("DELETE FROM jobs WHERE status='queued'")
+                # Also reset any stuck 'processing' jobs to be deleted if needed, but safe to just kill queued
+                log_event("WARN", "Admin PURGED the queue. Rescan triggered.")
                 
             conn.commit()
         finally:
             conn.close()
+            
+    # Trigger scan immediately after purge
+    if action == 'purge_queue': scan_and_queue()
+
     return jsonify({"status": "ok"})
 
 @app.route('/api/get_config')
@@ -758,57 +764,4 @@ def update_config():
         new_url = data['REMOTE_SOURCE_URL'].strip()
         if not new_url: new_url = None
         REMOTE_SOURCE_URL = new_url
-        log_event("WARN", f"Admin updated Remote Source URL to: {REMOTE_SOURCE_URL}")
-    return jsonify({"status": "ok", "new_value": REMOTE_SOURCE_URL})
-
-@app.route('/api/rescan_db')
-@requires_auth
-def api_rescan():
-    try:
-        scan_and_queue()
-        return jsonify({"status": "ok", "message": "Rescan completed."})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.errorhandler(Exception)
-def handle_exception(e):
-    if isinstance(e, (Response, HTTPException)): return e
-    log_event("CRITICAL", f"Unhandled Exception: {str(e)}\n{traceback.format_exc()}")
-    return "Internal Server Error", 500
-
-def maintenance_loop():
-    while True:
-        try:
-            logs_to_write = [] 
-            with db_lock:
-                conn = db_handler.get_connection(); cursor = conn.cursor()
-                try:
-                    now = datetime.now()
-                    cursor.execute("SELECT id, filename, last_updated, worker_id FROM jobs WHERE status IN ('processing', 'downloading', 'uploading')")
-                    for row in cursor.fetchall():
-                        jid, fname, last_up, worker_id = row
-                        if last_up:
-                            try:
-                                l_time = datetime.strptime(str(last_up).split('.')[0], "%Y-%m-%d %H:%M:%S")
-                                if (now - l_time).total_seconds() > 14400: # 4 Hours Timeout (Increased from 2hr)
-                                    logs_to_write.append(("WARN", f"Worker {worker_id} timed out. Resetting.", jid))
-                                    cursor.execute("UPDATE jobs SET status='queued', progress=0, worker_id=NULL, last_updated=?, started_at=NULL WHERE id=?", (now, jid))
-                            except: pass 
-                    conn.commit()
-                finally:
-                    conn.close()
-            for level, msg, jid in logs_to_write: log_event(level, msg, jid)
-        except Exception as e:
-            print(f"[!] Maintenance error: {e}")
-        time.sleep(60)
-
-print("[*] Initializing Database...")
-init_db()
-scan_and_queue()
-threading.Thread(target=maintenance_loop, daemon=True).start()
-print(f"[*] Manager initialized and ready. (Service URL: {SERVER_URL_DISPLAY})")
-
-if __name__ == '__main__':
-    print(f"[*] Manager running at {SERVER_URL_DISPLAY}")
-    print("[!] WARNING: Running in dev mode. Use 'gunicorn manager:app' for production.")
-    app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
+        log_event("WARN", f"Admin updated
