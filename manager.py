@@ -287,8 +287,10 @@ def verify_upload(filepath):
 # HYBRID SCANNER
 # ==============================================================================
 
-def scan_remote_http(url, prefix=""):
+def scan_remote_http(url, prefix="", depth=0):
     """Recursively scans an HTTP directory listing for video files."""
+    if depth > 10: return [] # Prevent infinite recursion
+    
     found = []
     try:
         headers = {'User-Agent': 'FractumManager/1.0'}
@@ -304,7 +306,7 @@ def scan_remote_http(url, prefix=""):
             full_url = urljoin(url, link)
             
             if link.endswith('/'):
-                found.extend(scan_remote_http(full_url, prefix=f"{prefix}{link}"))
+                found.extend(scan_remote_http(full_url, prefix=f"{prefix}{link}", depth=depth+1))
             elif any(link.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
                 from urllib.parse import unquote
                 clean_name = unquote(link)
@@ -468,6 +470,9 @@ def dashboard(): return render_template('dashboard.html')
 @limiter.limit("5 per minute") 
 @requires_auth
 def admin_panel(): return render_template('admin.html')
+
+@app.route('/api/ping')
+def api_ping(): return jsonify({"status": "pong"})
 
 @app.route('/dl/worker')
 def download_worker_script(): return send_file(WORKER_TEMPLATE_FILE, as_attachment=True, download_name='worker.py')
@@ -810,7 +815,8 @@ def maintenance_loop():
 
 print("[*] Initializing Database...")
 init_db()
-scan_and_queue()
+# FIXED: Run startup scan in thread to allow Gunicorn to bind immediately
+threading.Thread(target=scan_and_queue, daemon=True).start() 
 threading.Thread(target=maintenance_loop, daemon=True).start()
 print(f"[*] Manager initialized and ready. (Service URL: {SERVER_URL_DISPLAY})")
 
