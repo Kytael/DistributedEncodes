@@ -737,13 +737,15 @@ def admin_action():
                 log_event("WARN", f"Admin archived {len(rows)} jobs.")
             elif action == 'purge_queue':
                 c.execute("DELETE FROM jobs WHERE status='queued'")
-                log_event("WARN", "Admin PURGED the queue. Rescan triggered.")
+                log_event("WARN", "Admin PURGED the queue. Rescan triggered (background).")
                 
             conn.commit()
         finally:
             conn.close()
             
-    if action == 'purge_queue': scan_and_queue()
+    if action == 'purge_queue' or action == 'archive_history':
+        # FIXED: Run scan in a background thread to prevent client timeout
+        threading.Thread(target=scan_and_queue, daemon=True).start()
 
     return jsonify({"status": "ok"})
 
@@ -768,8 +770,9 @@ def update_config():
 @requires_auth
 def api_rescan():
     try:
-        scan_and_queue()
-        return jsonify({"status": "ok", "message": "Rescan completed."})
+        # Background thread for manual rescans too
+        threading.Thread(target=scan_and_queue, daemon=True).start()
+        return jsonify({"status": "ok", "message": "Rescan started in background."})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
