@@ -15,7 +15,6 @@ except ImportError:
 # Pull settings dynamically from config.py
 ADMIN_USER = getattr(config, 'ADMIN_USER', 'admin')
 ADMIN_PASS = getattr(config, 'ADMIN_PASS', 'password')
-# Use the public display URL (e.g. https://encode.fractumseraph.net)
 MANAGER_URL = getattr(config, 'SERVER_URL_DISPLAY', 'http://127.0.0.1:5000').rstrip('/')
 
 def run_tool():
@@ -24,6 +23,20 @@ def run_tool():
     print("==================================================")
     print(f"Target: {MANAGER_URL}")
     print(f"User:   {ADMIN_USER}")
+    
+    # 1. Health Check
+    print("[*] Checking server connectivity...")
+    try:
+        r = requests.get(f"{MANAGER_URL}/api/ping", timeout=5)
+        if r.status_code == 200:
+            print("[+] Server is Online.")
+        else:
+            print(f"[-] Server returned unexpected code: {r.status_code}")
+            return
+    except Exception as e:
+        print(f"[-] Could not connect to server: {e}")
+        return
+
     print("--------------------------------------------------")
     print("1. Archive History (Rename completed jobs, keep scores)")
     print("2. PURGE QUEUE (Delete all queued jobs, force Re-Scan)")
@@ -51,15 +64,18 @@ def run_tool():
             'User-Agent': 'FractumMaintenance/1.0'
         }
         
-        r = requests.post(url, json=payload, headers=headers, auth=(ADMIN_USER, ADMIN_PASS))
+        # Added timeout=30s to prevent hanging
+        r = requests.post(url, json=payload, headers=headers, auth=(ADMIN_USER, ADMIN_PASS), timeout=30)
         
         if r.status_code == 200:
             print(f"[+] Success! {action} completed.")
             if action == "purge_queue":
-                print("[*] The database is now re-scanning remote/local files...")
+                print("[*] The database is now re-scanning remote/local files in the background.")
         else:
             print(f"[-] Failed: {r.status_code} - {r.text}")
             
+    except requests.exceptions.Timeout:
+        print("[!] Error: Server timed out processing the request.")
     except Exception as e:
         print(f"[!] Connection Error: {e}")
 
