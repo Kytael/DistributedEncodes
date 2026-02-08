@@ -1,25 +1,29 @@
 import requests
-import argparse
-import time
+import sys
+import os
 
-# CONFIGURATION
-# ---------------------------------------------------------
-# Point directly to your public domain
-MANAGER_URL = "https://encode.fractumseraph.net"
+# Ensure we can find config.py in the current directory
+sys.path.append(os.getcwd())
 
 try:
-    from config import ADMIN_USER, ADMIN_PASS
-except:
-    print("[!] Config not found, using default credentials.")
-    ADMIN_USER = "admin"
-    ADMIN_PASS = "password"
-# ---------------------------------------------------------
+    import config
+except ImportError:
+    print("[!] Error: 'config.py' not found.")
+    print("    Please run this script from the same folder as your manager and config.py.")
+    sys.exit(1)
+
+# Pull settings dynamically from config.py
+ADMIN_USER = getattr(config, 'ADMIN_USER', 'admin')
+ADMIN_PASS = getattr(config, 'ADMIN_PASS', 'password')
+# Use the public display URL (e.g. https://encode.fractumseraph.net)
+MANAGER_URL = getattr(config, 'SERVER_URL_DISPLAY', 'http://127.0.0.1:5000').rstrip('/')
 
 def run_tool():
     print("==================================================")
     print(" FRACTUM MAINTENANCE TOOL")
     print("==================================================")
-    print(f"Target Server: {MANAGER_URL}")
+    print(f"Target: {MANAGER_URL}")
+    print(f"User:   {ADMIN_USER}")
     print("--------------------------------------------------")
     print("1. Archive History (Rename completed jobs, keep scores)")
     print("2. PURGE QUEUE (Delete all queued jobs, force Re-Scan)")
@@ -40,7 +44,7 @@ def run_tool():
         url = f"{MANAGER_URL}/api/admin_action"
         payload = {"action": action}
         
-        # Headers MUST match the PUBLIC domain to pass CSRF
+        # Headers auto-match the MANAGER_URL to pass CSRF security
         headers = {
             'Origin': MANAGER_URL,
             'Referer': MANAGER_URL,
