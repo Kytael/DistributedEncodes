@@ -75,6 +75,7 @@
                 <button onclick="act('all','clear_stale')" style="border-color: var(--neon-orange); color: var(--neon-orange);">[ PRUNE DEAD WORKERS ]</button>
                 <button onclick="act('all','retry_all_failed')" style="border-color: var(--neon-red); color: var(--neon-red);">[ RESET FAILED ]</button>
                 <button onclick="act('all','archive_history')" style="border-color: var(--neon-pink); color: var(--neon-pink);">[ ARCHIVE HISTORY ]</button>
+                <button onclick="act('all','purge_queue')" style="border-color: var(--neon-red); color: var(--neon-red);">[ PURGE QUEUE ]</button>
                 <button onclick="rescanDB()" style="border-color: var(--neon-green); color: var(--neon-green);">[ SCAN FILES ]</button>
                 <button onclick="refreshAll()" style="border-color: var(--neon-purple); color: var(--neon-purple);">[ REFRESH DATA ]</button>
             </div>
@@ -288,6 +289,7 @@
             if (action === 'retry_all_failed') msg = "WARNING: This will reset ALL failed jobs. Confirm?";
             if (action === 'clear_stale') msg = "Clear workers silent for >10 mins?";
             if (action === 'archive_history') msg = "ARCHIVE ALL HISTORY? This will force a re-encode of ALL files.";
+            if (action === 'purge_queue') msg = "DELETE ALL QUEUED JOBS? (They will come back if files exist on disk)";
             
             if(!confirm(msg)) return;
             fetch('/api/admin_action', {
