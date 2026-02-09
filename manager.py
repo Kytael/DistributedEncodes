@@ -91,7 +91,7 @@ limiter = Limiter(
 
 job_queue = queue.Queue()
 queued_job_ids = set()
-db_lock = threading.Lock()
+db_lock = threading.RLock()
 
 # Cache for outdated worker logs to prevent spamming DB
 OUTDATED_LOG_CACHE = {} 
