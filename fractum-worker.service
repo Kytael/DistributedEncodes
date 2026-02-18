@@ -15,7 +15,7 @@ WorkingDirectory=/home/pi/DistributedEncodes
 # COMMAND TO RUN
 # Adjust the flags (--manager, --username, etc.) as needed.
 # Note: We use -u to force unbuffered output so logs appear instantly.
-ExecStart=/usr/bin/python3 -u worker.py --manager --username "pi" --workername "pi" --jobs 1
+ExecStart=/usr/bin/python3 -u worker_template.py --username "pi" --workername "pi" --jobs 1
 
 # RESTART POLICY
 # Vital for this worker: If it updates itself or crashes, systemd will restart it.
