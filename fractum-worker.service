@@ -1,0 +1,25 @@
+[Unit]
+Description=Fractum Distributed Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# CHANGE THIS to your username (e.g., pi, ubuntu, or your specific user)
+User=pi
+Group=pi
+
+# CHANGE THIS to the folder where worker.py is located
+WorkingDirectory=/home/pi/distributed-encodes
+
+# COMMAND TO RUN
+# Adjust the flags (--manager, --username, etc.) as needed.
+# Note: We use -u to force unbuffered output so logs appear instantly.
+ExecStart=/usr/bin/python3 -u worker.py --manager "https://encode.fractumseraph.net/" --username "RaspberryPi" --workername "Node-1" --jobs 1
+
+# RESTART POLICY
+# Vital for this worker: If it updates itself or crashes, systemd will restart it.
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
