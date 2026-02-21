@@ -217,6 +217,15 @@ def is_version_sufficient(client_ver, min_ver):
     except:
         return False
 
+def is_worker_banned(worker_id):
+    if not worker_id: return False
+    try:
+        with open("banned_workers.txt", "r") as f:
+            banned_list = [line.strip().lower() for line in f.readlines() if line.strip()]
+            return worker_id.strip().lower() in banned_list
+    except FileNotFoundError:
+        return False
+
 @app.after_request
 def add_security_headers(response):
     response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
@@ -512,6 +521,15 @@ def get_job():
     worker_id = sanitize_input(request.args.get('worker_id'))
     worker_version = sanitize_input(request.args.get('version'))
     
+    if is_worker_banned(worker_id):
+        now = time.time()
+        last_log = OUTDATED_LOG_CACHE.get(f"banned_{worker_id}", 0)
+        if now - last_log > 300: 
+            log_event("WARN", f"Banned worker blocked from getting jobs: {worker_id}")
+            OUTDATED_LOG_CACHE[f"banned_{worker_id}"] = now
+        
+        return jsonify({"status": "empty", "message": "Unauthorized"}), 403
+    
     # [ENFORCEMENT] Check Minimum Client Version
     if not is_version_sufficient(worker_version, MIN_CLIENT_VERSION):
         # LOGGING ADDED: Log specific workers (throttled to 5 mins) to prove they are alive
@@ -655,20 +673,26 @@ def receive_log():
             with gzip.open(log_path, 'rt', encoding='utf-8', errors='ignore') as f:
                 log_content = f.read().lower()
                 
-                # 1. Check for GPU Encoders
-                gpu_encoders = ['nvenc', 'qsv', 'amf', 'videotoolbox', 'hevc_amf']
-                for enc in gpu_encoders:
-                    if enc in log_content:
-                        warnings.append(f"GPU USED ({enc.upper()})")
-                        break
+                # 1. Check for GPU Encoders (Safely)
+                mapping_block = re.search(r'stream mapping:(.*?)(?:press \[|output #)', log_content, re.DOTALL)
+                
+                if mapping_block:
+                    mapping_text = mapping_block.group(1)
+                    gpu_encoders = ['nvenc', 'qsv', 'amf', 'videotoolbox', 'hevc_amf']
+                    for enc in gpu_encoders:
+                        if enc in mapping_text:
+                            warnings.append(f"GPU USED ({enc.upper()})")
+                            break
                 
                 # 2. Check SVT-AV1 preset 
-                # SVT-AV1 outputs "Svt[info]: Preset : 2" in its log header
                 preset_match = re.search(r'svt\[info\]:\s*preset\s*:\s*(\d+)', log_content)
                 if preset_match:
                     used_preset = preset_match.group(1)
-                    if used_preset != "2":  # Compare against your intended config
+                    if used_preset != "2": 
                         warnings.append(f"PRESET MODIFIED (Used {used_preset}, Expected 2)")
+                elif "libsvtav1" not in log_content:
+                    if not warnings:
+                        warnings.append("NON-STANDARD ENCODER USED")
 
         except Exception as e:
             log_event("WARN", f"Could not parse log for {job_id}: {e}")
