@@ -241,9 +241,15 @@
                         actions = `<button onclick="act('${escapeHTML(j.id)}','retry')" style="border-color:var(--neon-green); color:var(--neon-green)">RETRY</button> ` + actions;
                     }
 
+                    // NEW: Build warning badge
+                    let warningBadge = "";
+                    if (j.warnings) {
+                        warningBadge = `<span style="color:var(--neon-red); font-weight:bold; font-size:1.2em; cursor:help; margin-left: 5px;" title="${escapeHTML(j.warnings)}">[!]</span>`;
+                    }
+
                     return `<tr>
                         <td title="${escapeHTML(j.id)}">${escapeHTML(cleanName)}</td>
-                        <td class="st-${j.status}">${j.status.toUpperCase()}</td>
+                        <td class="st-${j.status}">${j.status.toUpperCase()} ${warningBadge}</td>
                         <td>${workerDisplay}</td>
                         <td>${actions}</td>
                     </tr>`;
