@@ -11,6 +11,7 @@ import traceback
 import uuid
 import secrets
 import platform
+import gzip
 from functools import wraps
 from datetime import datetime, timedelta
 from urllib.parse import quote, urljoin
@@ -455,6 +456,8 @@ def init_db():
         except sqlite3.OperationalError: pass
         try: cursor.execute("ALTER TABLE jobs ADD COLUMN source_url TEXT")
         except sqlite3.OperationalError: pass
+        try: cursor.execute("ALTER TABLE jobs ADD COLUMN warnings TEXT")
+        except sqlite3.OperationalError: pass
         
         conn.commit()
         conn.close()
@@ -632,6 +635,57 @@ def upload_result():
         return jsonify({"status": "success"})
     return jsonify({"status": "error"}), 400
 
+@app.route('/upload_log', methods=['POST'])
+@requires_worker_auth
+def receive_log():
+    job_id = request.form.get('job_id')
+    worker_id = sanitize_input(request.form.get('worker_id'))
+    
+    if 'log_file' in request.files and job_id:
+        log_dir = os.path.join(os.getcwd(), "encode_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Save the compressed file
+        safe_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', job_id)
+        log_path = os.path.join(log_dir, f"{safe_name}.log.gz")
+        request.files['log_file'].save(log_path)
+        
+        warnings = []
+        try:
+            with gzip.open(log_path, 'rt', encoding='utf-8', errors='ignore') as f:
+                log_content = f.read().lower()
+                
+                # 1. Check for GPU Encoders
+                gpu_encoders = ['nvenc', 'qsv', 'amf', 'videotoolbox', 'hevc_amf']
+                for enc in gpu_encoders:
+                    if enc in log_content:
+                        warnings.append(f"GPU USED ({enc.upper()})")
+                        break
+                
+                # 2. Check SVT-AV1 preset 
+                # SVT-AV1 outputs "Svt[info]: Preset : 2" in its log header
+                import re
+                preset_match = re.search(r'svt\[info\]:\s*preset\s*:\s*(\d+)', log_content)
+                if preset_match:
+                    used_preset = preset_match.group(1)
+                    if used_preset != "2":  # Compare against your intended config
+                        warnings.append(f"PRESET MODIFIED (Used {used_preset}, Expected 2)")
+
+        except Exception as e:
+            log_event("WARN", f"Could not parse log for {job_id}: {e}")
+            
+        if warnings:
+            warning_str = " | ".join(warnings)
+            log_event("WARN", f"CHEATING DETECTED by {worker_id}: {warning_str}", job_id)
+            with db_lock:
+                conn = db_handler.get_connection()
+                conn.execute("UPDATE jobs SET warnings=? WHERE id=?", (warning_str, job_id))
+                conn.commit()
+                conn.close()
+                
+        return jsonify({"status": "success"})
+    return jsonify({"status": "error"}), 400
+
 @app.route('/report_status', methods=['POST'])
 @requires_worker_auth
 def report_status():
@@ -694,7 +748,7 @@ def api_all_jobs():
         conn = db_handler.get_connection(); conn.row_factory = sqlite3.Row
         try:
             c = conn.cursor()
-            c.execute("SELECT id, status, worker_id, worker_version, last_updated FROM jobs ORDER BY last_updated DESC")
+            c.execute("SELECT id, status, worker_id, worker_version, last_updated, warnings FROM jobs ORDER BY last_updated DESC")
             jobs = [dict(r) for r in c.fetchall()]
         finally:
             conn.close()
