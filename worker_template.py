@@ -14,6 +14,7 @@ import signal
 import zipfile
 import tarfile
 import io
+import gzip
 from datetime import datetime, timedelta
 
 # ==============================================================================
@@ -662,32 +663,57 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                 
                 with PROC_LOCK: ACTIVE_PROCS[worker_id] = proc
                 
-                while True:
-                    if PAUSE_REQUESTED:
-                        time.sleep(0.2); continue
+                raw_log_path = os.path.join(temp_dir, "encode.log")
+                with open(raw_log_path, 'w', encoding='utf-8') as raw_log:
+                    while True:
+                        if PAUSE_REQUESTED:
+                            time.sleep(0.2); continue
 
-                    line = proc.stdout.readline()
-                    if line: log_buffer.append(line); log_buffer = log_buffer[-50:]
-                    if not line and proc.poll() is not None: break
-                    
-                    if "out_time=" in line and "N/A" not in line and total_sec > 0:
-                        try:
-                            time_str = line.split('=')[1].strip()
-                            curr_sec = get_seconds(time_str)
-                            pct = int((curr_sec/total_sec)*100)
+                        line = proc.stdout.readline()
+                        if line: 
+                            log_buffer.append(line); log_buffer = log_buffer[-50:]
+                            raw_log.write(line)
+                            raw_log.flush()
                             
-                            if single_mode: print_progress(worker_id, curr_sec, total_sec, prefix='Enc')
-                            else: update_status(f"Enc {pct}%")
-                            
-                            if time.time() - last_rep > 10:
-                                post_status("processing", pct)
-                                last_rep = time.time()
-                        except: pass
+                        if not line and proc.poll() is not None: break
+                        
+                        if "out_time=" in line and "N/A" not in line and total_sec > 0:
+                            try:
+                                time_str = line.split('=')[1].strip()
+                                curr_sec = get_seconds(time_str)
+                                pct = int((curr_sec/total_sec)*100)
+                                
+                                if single_mode: print_progress(worker_id, curr_sec, total_sec, prefix='Enc')
+                                else: update_status(f"Enc {pct}%")
+                                
+                                if time.time() - last_rep > 10:
+                                    post_status("processing", pct)
+                                    last_rep = time.time()
+                            except: pass
                 
                 with PROC_LOCK:
                     if worker_id in ACTIVE_PROCS: del ACTIVE_PROCS[worker_id]
 
                 enc_time = time.time() - start_enc
+                
+                gz_log_path = os.path.join(temp_dir, "encode.log.gz")
+                try:
+                    with open(raw_log_path, 'rb') as f_in, gzip.open(gz_log_path, 'wb') as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+                except Exception as e:
+                    log(worker_id, f"Failed to compress log: {e}", "WARN")
+
+                def upload_encode_log():
+                    if os.path.exists(gz_log_path):
+                        try:
+                            with open(gz_log_path, 'rb') as lf:
+                                requests.post(f"{manager_url}/upload_log", 
+                                    files={'log_file': (f"{job_id.replace('/', '_')}.log.gz", lf)},
+                                    data={'job_id': job_id, 'worker_id': worker_id},
+                                    headers=get_auth_headers(), timeout=60)
+                        except Exception as e:
+                            log(worker_id, f"Failed to upload log: {e}", "WARN")
+
                 if single_mode: print_progress(worker_id, total_sec, total_sec, prefix='Enc', suffix='OK')
 
                 if proc.returncode == 0 and os.path.exists(local_dst):
@@ -738,10 +764,12 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                     if upload_success:
                         if single_mode: print_progress(worker_id, 100, 100, prefix='Up', suffix='OK')
                         log(worker_id, "Job complete.")
+                        upload_encode_log()
                     else:
                         err_msg = "Upload failed after 3 attempts"
                         log(worker_id, err_msg, "ERROR")
                         post_status("failed", error_msg=err_msg)
+                        upload_encode_log()
 
                 else:
                     err_msg = f"FFmpeg exited with code {proc.returncode}"
@@ -752,9 +780,12 @@ def worker_task(worker_id, manager_url, temp_dir, quota_tracker, single_mode=Fal
                     for l in log_buffer: safe_print(f"    {l.strip()}")
                     log(worker_id, "--------------------------", "ERROR")
                     post_status("failed", error_msg=err_msg)
+                    upload_encode_log()
 
                 if os.path.exists(local_src): os.remove(local_src)
                 if os.path.exists(local_dst): os.remove(local_dst)
+                if os.path.exists(raw_log_path): os.remove(raw_log_path)
+                if os.path.exists(gz_log_path): os.remove(gz_log_path)
             else:
                 if single_mode:
                     with CONSOLE_LOCK:
