@@ -664,7 +664,6 @@ def receive_log():
                 
                 # 2. Check SVT-AV1 preset 
                 # SVT-AV1 outputs "Svt[info]: Preset : 2" in its log header
-                import re
                 preset_match = re.search(r'svt\[info\]:\s*preset\s*:\s*(\d+)', log_content)
                 if preset_match:
                     used_preset = preset_match.group(1)
